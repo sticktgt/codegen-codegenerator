@@ -1,0 +1,48 @@
+llm:
+  provider: "ollama"
+  ollama:
+    base_url: "http://192.168.50.165:18081"
+    timeout_sec: 420
+    think: false
+    temperature: 0.0
+    num_ctx: 4096
+    num_predict: 600
+    keep_alive: 0
+    options:
+      num_thread: 6
+      num_batch: 96
+      use_mmap: false
+
+codegenerator:
+  prompts:
+    system_rules: "prompts/system_rules_code_edit.txt"
+    planner_user_template: "prompts/planner_user_template.txt"
+    coder_user_template: "prompts/coder_user_template.txt"
+    repair_user_template: "prompts/repair_user_template.txt"
+    test_generator_user_template: "prompts/test_generator_user_template.txt"
+    test_generator_example: "prompts/test_example_pytest_raises.txt"
+
+  models:
+    planner_model: "qwen3:14b-q4_K_M"
+    coder_model: "qwen2.5-coder:14b-instruct-q4_K_M"
+    test_generator_model: "qwen2.5-coder:7b-instruct"
+    repair_model: "qwen2.5-coder:14b-instruct-q4_K_M"
+
+  generation:
+    repair_enabled: true
+    max_repair_attempts: 1
+    test_generation_mode: "always"
+    test_generator_max_example_tests: 1
+
+  defaults:
+    constraints:
+      - "Меняй только указанный target"
+      - "Не добавляй внешние зависимости"
+      - "Сохраняй стиль окружающего кода"
+      - "Не меняй поведение без явного требования"
+
+  trace:
+    save_to_file: true
+    show_prompts: true
+    show_raw_llm_output: true
+    output_dir: "runs"

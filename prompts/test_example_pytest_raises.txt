@@ -1,0 +1,20 @@
+from __future__ import annotations
+
+# pytest импортируется только потому, что ниже используется pytest.raises.
+import pytest
+
+from demo_app.services.approval import requires_manual_approval
+from demo_app.services.validation import validate_discount_percent
+
+
+def test_requires_manual_approval_for_high_price() -> None:
+    assert requires_manual_approval(6000, 10)
+
+
+def test_requires_manual_approval_for_normal_case() -> None:
+    assert not requires_manual_approval(4000, 10)
+
+
+def test_validate_discount_percent_raises_for_negative_value() -> None:
+    with pytest.raises(ValueError):
+        validate_discount_percent(-1)

@@ -1,0 +1,31 @@
+Подготовь компактный план изменения Python-кода.
+
+Верни только валидный JSON.
+
+Обязательные поля JSON:
+- operation
+- target_file
+- target_symbol
+- intent_summary
+- constraints
+- reference_symbol
+
+Правила:
+- Не придумывай файлы и symbols.
+- Используй только предоставленные target-данные.
+- Поле intent_summary должно быть коротким и конкретным.
+- Поле constraints должно быть JSON-массивом коротких строк.
+- Поле reference_symbol может быть null.
+- Все текстовые значения в JSON пиши на русском языке.
+- Не смешивай русский и английский язык в тексте ответа.
+
+Входные данные:
+Experiment name: {experiment_name}
+Operation: {operation}
+Target file: {target_file}
+Target symbol: {target_symbol}
+Insert after: {insert_after}
+Reference symbol: {reference_symbol}
+
+Запрос пользователя:
+{request}

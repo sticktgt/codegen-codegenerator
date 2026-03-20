@@ -1,0 +1,29 @@
+request_id: example-generate
+mode: generate
+change_request:
+  title: Изменить формирование текста уведомления о назначении тикета
+  description: Сделать текст уведомления русскоязычным и использовать формулировку
+    «теперь назначен на».
+  constraints:
+  - Не менять внешний контракт API
+  - Изменить только текст уведомления
+target:
+  qualname: support_app.services.notification_service.build_assignment_message
+  file_path: support_app/services/notification_service.py
+  operation: replace_symbol
+project_context:
+  module_outline: []
+  full_file_source: "from support_app.domain.models import Ticket\n\ndef build_assignment_message(ticket:\
+    \ Ticket, agent_name: str) -> str:\n    \"\"\"Формирует короткое уведомление после\
+    \ назначения тикета агенту.\"\"\"\n    return f\"Ticket {ticket.ticket_id} assigned\
+    \ to {agent_name}.\"\n"
+  target_symbol:
+    name: build_assignment_message
+    source: "def build_assignment_message(ticket: Ticket, agent_name: str) -> str:\n\
+      \    \"\"\"Формирует короткое уведомление после назначения тикета агенту.\"\"\
+      \"\n    return f\"Ticket {ticket.ticket_id} assigned to {agent_name}.\""
+  related_tests: []
+reference_context:
+  reference_artifacts: []
+options:
+  generate_test_mode: never

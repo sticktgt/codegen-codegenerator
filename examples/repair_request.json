@@ -1,0 +1,30 @@
+{
+  "request_id": "example-repair",
+  "mode": "repair",
+  "previous_generation_request_id": "example-generate",
+  "error_context": {
+    "error_type": "test_failure",
+    "summary": "Тест ожидает русскоязычную строку с фразой теперь назначен на",
+    "details": "AssertionError: expected russian message"
+  },
+  "previous_artifact": {
+    "operation": "replace_function",
+    "target_qualname": "support_app.services.notification_service.build_assignment_message",
+    "target_file": "support_app/services/notification_service.py",
+    "code": "def build_assignment_message(ticket: Ticket, agent_name: str) -> str:\n    return f'Assigned to {agent_name}'"
+  },
+  "project_context": {
+    "module_outline": [],
+    "full_file_source": "from support_app.domain.models import Ticket\n\ndef build_assignment_message(ticket: Ticket, agent_name: str) -> str:\n    \"\"\"Формирует короткое уведомление после назначения тикета агенту.\"\"\"\n    return f\"Ticket {ticket.ticket_id} assigned to {agent_name}.\"\n",
+    "target_symbol": {
+      "name": "build_assignment_message",
+      "source": "def build_assignment_message(ticket: Ticket, agent_name: str) -> str:\n    \"\"\"Формирует короткое уведомление после назначения тикета агенту.\"\"\"\n    return f\"Ticket {ticket.ticket_id} assigned to {agent_name}.\""
+    }
+  },
+  "reference_context": {
+    "reference_artifacts": []
+  },
+  "options": {
+    "generate_test": false
+  }
+}
