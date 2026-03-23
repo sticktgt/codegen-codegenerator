@@ -62,6 +62,11 @@ class RuntimeConfig:
     max_repair_attempts: int
     test_generation_mode: str
     test_generator_max_example_tests: int
+    coder_prompt_target_chars: int
+    coder_prompt_hard_limit: int
+    coder_max_reference_artifacts: int
+    coder_max_reference_chars: int
+    coder_max_full_file_chars: int
     trace: TraceSettings
     config_path: str
 
@@ -178,6 +183,11 @@ def load_config(config_path: str | Path | None = None) -> RuntimeConfig:
         max_repair_attempts=int(generation_cfg.get('max_repair_attempts', 1)),
         test_generation_mode=str(generation_cfg.get('test_generation_mode', 'always')),
         test_generator_max_example_tests=int(generation_cfg.get('test_generator_max_example_tests', 1)),
+        coder_prompt_target_chars=int(generation_cfg.get('coder_prompt_target_chars', 5000)),
+        coder_prompt_hard_limit=int(generation_cfg.get('coder_prompt_hard_limit', 5400)),
+        coder_max_reference_artifacts=int(generation_cfg.get('coder_max_reference_artifacts', 1)),
+        coder_max_reference_chars=int(generation_cfg.get('coder_max_reference_chars', 650)),
+        coder_max_full_file_chars=int(generation_cfg.get('coder_max_full_file_chars', 0)),
         trace=TraceSettings(
             save_to_file=bool(trace_cfg.get('save_to_file', True)),
             show_prompts=bool(trace_cfg.get('show_prompts', True)),

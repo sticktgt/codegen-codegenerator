@@ -196,6 +196,6 @@ python -m codegenerator repair --request-file examples/repair_request.json
 ### ADR-004. Prompt templates хранятся в файлах
 Шаблоны prompt-ов не захардкоживаются в Python-коде и подгружаются из `config.yaml`.
 
-## Ближайший следующий шаг
+## Repair
 
-Подключение `codegenerator` как внешнего шага в `codecollector` через CLI-вызов с `GenerationRequest` / `RepairRequest` и apply/validate loop на стороне `codecollector`.
+`repair` получает исходный change request, previous artifact, summary ошибки apply/verification и project/reference context. Repair prompt должен исправить ошибку и сохранить requested change, а не откатывать target к исходной реализации.

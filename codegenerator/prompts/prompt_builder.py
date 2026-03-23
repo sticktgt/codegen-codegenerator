@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from codegenerator.config import RuntimeConfig
 from codegenerator.models.requests import GenerationRequest, RepairRequest
 
 
@@ -16,6 +17,70 @@ def merged_constraints(req_constraints: list[str], default_constraints: list[str
         if item and item not in out:
             out.append(item)
     return out
+
+
+def _truncate_text(value: str, limit: int) -> tuple[str, bool]:
+    if limit <= 0 or len(value) <= limit:
+        return value, False
+    return value[: max(0, limit - 24)] + "\n# ... truncated ...", True
+
+
+def _render_module_outline(module_outline: list[dict[str, Any]]) -> str:
+    if not module_outline:
+        return '[]'
+    lines: list[str] = []
+    for item in module_outline[:12]:
+        qualname = item.get('qualname', '')
+        kind = item.get('kind', '')
+        name = item.get('name', '')
+        doc = (item.get('docstring', '') or '').strip().replace('\n', ' ')
+        suffix = f' — {doc[:120]}' if doc else ''
+        lines.append(f'- [{kind}] {qualname or name}{suffix}')
+    return "\n".join(lines)
+
+
+def _render_target_symbol(target_symbol: dict[str, Any]) -> str:
+    source = (target_symbol.get('source') or '').strip()
+    if source:
+        return source
+    return _pretty({k: v for k, v in target_symbol.items() if k != 'source'})
+
+
+def _render_reference_artifacts(reference_context: dict[str, Any], max_items: int, per_item_chars: int) -> tuple[str, dict[str, Any]]:
+    artifacts = list(reference_context.get('reference_artifacts') or [])[:max_items]
+    blocks: list[str] = []
+    total_chars = 0
+    titles: list[str] = []
+    content_modes: list[str] = []
+    for item in artifacts:
+        content, truncated = _truncate_text(str(item.get('content', '')), per_item_chars)
+        title = str(item.get('title', ''))
+        usage_mode = str(item.get('usage_mode', ''))
+        block = f"Title: {title}\nUsage mode: {usage_mode}\nCode:\n{content}"
+        if truncated:
+            block += "\n# content truncated"
+        blocks.append(block)
+        titles.append(title)
+        content_modes.append(str(item.get('content_mode', '')))
+        total_chars += len(content)
+    rendered = "\n\n---\n\n".join(blocks) if blocks else 'none'
+    metrics = {
+        'reference_count': len(artifacts),
+        'reference_chars': total_chars,
+        'reference_titles': titles,
+        'reference_content_modes': content_modes,
+    }
+    return rendered, metrics
+
+
+def _build_coder_prompt_metrics(prompt: str, target_text: str, full_file_text: str, reference_text: str, before_trim: int, after_trim: int) -> dict[str, Any]:
+    return {
+        'coder_prompt_chars_before_trim': before_trim,
+        'coder_prompt_chars_after_trim': after_trim,
+        'coder_target_chars': len(target_text),
+        'coder_full_file_chars': len(full_file_text),
+        'coder_reference_chars': len(reference_text),
+    }
 
 
 def build_planner_user_prompt(template_text: str, request: GenerationRequest, default_constraints: list[str]) -> str:
@@ -33,21 +98,60 @@ def build_planner_user_prompt(template_text: str, request: GenerationRequest, de
     ) + "\n\nОграничения:\n" + _pretty(constraints)
 
 
-def build_coder_user_prompt(template_text: str, request: GenerationRequest, planner_result: dict[str, Any]) -> str:
+def build_coder_user_prompt(template_text: str, request: GenerationRequest, planner_result: dict[str, Any], runtime_config: RuntimeConfig) -> tuple[str, dict[str, Any]]:
     pc = request.project_context or {}
-    return template_text.format(
-        operation=request.target.get('operation', 'replace_symbol'),
-        target_file=request.target.get('file_path', ''),
-        target_symbol=request.target.get('qualname', ''),
-        insert_after=request.target.get('insert_after') or 'null',
-        reference_symbol='null',
-        planner_json=_pretty(planner_result),
-        request=((request.change_request.get('title', '') + "\n" + request.change_request.get('description', '')).strip()),
-        module_outline=_pretty(pc.get('module_outline', [])),
-        target_function=_pretty(pc.get('target_symbol') or pc.get('target_function') or {}),
-        reference_function='null',
-        full_file_source=pc.get('full_file_source', ''),
-    ) + "\n\nReference context:\n" + _pretty(request.reference_context)
+    module_outline_text = _render_module_outline(pc.get('module_outline', []))
+    target_text = _render_target_symbol(pc.get('target_symbol') or pc.get('target_function') or {})
+    full_file_text = str(pc.get('full_file_source', '') or '')
+    if runtime_config.coder_max_full_file_chars <= 0:
+        full_file_text = ''
+    else:
+        full_file_text, _ = _truncate_text(full_file_text, runtime_config.coder_max_full_file_chars)
+    reference_text, ref_metrics = _render_reference_artifacts(
+        request.reference_context or {},
+        runtime_config.coder_max_reference_artifacts,
+        runtime_config.coder_max_reference_chars,
+    )
+
+    def _render(module_outline_value: str, target_value: str, full_file_value: str, reference_value: str) -> str:
+        return template_text.format(
+            operation=request.target.get('operation', 'replace_symbol'),
+            target_file=request.target.get('file_path', ''),
+            target_symbol=request.target.get('qualname', ''),
+            insert_after=request.target.get('insert_after') or 'null',
+            reference_symbol='null',
+            planner_json=_pretty(planner_result),
+            request=((request.change_request.get('title', '') + "\n" + request.change_request.get('description', '')).strip()),
+            module_outline=module_outline_value,
+            target_function=target_value,
+            reference_function=reference_value,
+            full_file_source=full_file_value,
+        )
+
+    initial_prompt = _render(module_outline_text, target_text, full_file_text, reference_text)
+    before_trim = len(initial_prompt)
+
+    if len(initial_prompt) > runtime_config.coder_prompt_target_chars and full_file_text:
+        full_file_text = ''
+    prompt = _render(module_outline_text, target_text, full_file_text, reference_text)
+
+    if len(prompt) > runtime_config.coder_prompt_target_chars and reference_text != 'none':
+        compact_reference_text, ref_metrics = _render_reference_artifacts(
+            request.reference_context or {},
+            1,
+            max(300, runtime_config.coder_max_reference_chars // 2),
+        )
+        reference_text = compact_reference_text
+        prompt = _render(module_outline_text, target_text, full_file_text, reference_text)
+
+    if len(prompt) > runtime_config.coder_prompt_hard_limit:
+        target_text, _ = _truncate_text(target_text, max(220, runtime_config.coder_prompt_hard_limit // 4))
+        module_outline_text, _ = _truncate_text(module_outline_text, 600)
+        prompt = _render(module_outline_text, target_text, full_file_text, reference_text)
+
+    metrics = _build_coder_prompt_metrics(prompt, target_text, full_file_text, reference_text, before_trim, len(prompt))
+    metrics.update(ref_metrics)
+    return prompt, metrics
 
 
 def build_repair_user_prompt(template_text: str, request: RepairRequest) -> str:
@@ -55,14 +159,17 @@ def build_repair_user_prompt(template_text: str, request: RepairRequest) -> str:
     target_symbol = project_context.get('target_symbol') or {}
     module_outline = project_context.get('module_outline', [])
     full_file_source = project_context.get('full_file_source', '')
+    change_request = request.change_request or {}
+    change_request_text = ((change_request.get('title', '') + '\n' + change_request.get('description', '')).strip() or 'repair request')
+    constraints = change_request.get('constraints', []) or []
 
     values = {
         'operation': request.previous_artifact.get('operation', 'replace_symbol'),
         'target_file': request.previous_artifact.get('target_file', ''),
         'target_symbol': request.previous_artifact.get('target_qualname', request.previous_artifact.get('target_symbol', '')),
         'insert_after': request.previous_artifact.get('insert_after') or 'null',
-        'request': request.error_context.get('summary', 'repair request'),
-        'planner_json': _pretty({'repair_for': request.previous_generation_request_id}),
+        'request': change_request_text,
+        'planner_json': _pretty({'repair_for': request.previous_generation_request_id, 'change_request': change_request}),
         'verification_summary': _pretty(request.error_context),
         'verification_summary_json': _pretty(request.error_context),
         'module_outline': _pretty(module_outline),
@@ -74,8 +181,33 @@ def build_repair_user_prompt(template_text: str, request: RepairRequest) -> str:
         'reference_function_block': '',
         'full_file_source_block': '\n\nFull file source:\n' + full_file_source if full_file_source else '',
     }
-    return template_text.format(**values) + "\n\nReference context:\n" + _pretty(request.reference_context)
-
+    reference_context = request.reference_context or {}
+    compact_reference = {
+        'reference_summary': reference_context.get('reference_summary', {}),
+        'reference_artifacts': [
+            {
+                'title': item.get('title', ''),
+                'usage_mode': item.get('usage_mode', ''),
+                'content_mode': item.get('content_mode', ''),
+                'content': item.get('content', ''),
+            }
+            for item in list(reference_context.get('reference_artifacts') or [])[:1]
+        ],
+    }
+    extra = [
+        'Change request to preserve:',
+        change_request_text,
+        '',
+        'Constraints:',
+        _pretty(constraints),
+        '',
+        'Repair instruction:',
+        'Fix the generated code so it becomes valid and keeps the requested change. Do not revert to the original implementation unless the change request explicitly asks for that.',
+        '',
+        'Reference context:',
+        _pretty(compact_reference),
+    ]
+    return template_text.format(**values) + '\n\n' + '\n'.join(extra)
 
 def build_test_generator_user_prompt(template_text: str, request: GenerationRequest, planner_result: dict[str, Any], generated_test_file: str, example_test_source: str) -> str:
     pc = request.project_context or {}

@@ -6,7 +6,7 @@ def get_logger(name: str = 'codegenerator') -> logging.Logger:
     if logger.handlers:
         return logger
     logger.setLevel(logging.INFO)
-    handler = logging.StreamHandler(sys.stdout)
+    handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(name)s | %(message)s'))
     logger.addHandler(handler)
     logger.propagate = False

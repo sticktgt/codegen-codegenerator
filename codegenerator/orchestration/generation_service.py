@@ -42,14 +42,23 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
     try:
         planner_prompt = build_planner_user_prompt(prompts['planner_user_template'], request, config.defaults_constraints)
         logger.info('generate request_id=%s models planner=%s coder=%s test=%s repair=%s test_mode=%s', request.request_id, config.models.planner_model, config.models.coder_model, config.models.test_generator_model, config.models.repair_model, config.test_generation_mode)
-        planner_raw, planner_meta = call_model(client=client, model=config.models.planner_model, system_prompt=prompts['system_rules'], user_prompt=planner_prompt, think=config.ollama.think, config=config, step='planner')
-        planner_result = parse_planner_response(planner_raw.content)
-        _add_step(trace, 'planner', {'meta': _serialize_meta(planner_meta), 'prompt': planner_prompt, 'raw': planner_raw.raw, 'content': planner_raw.content, 'parsed': planner_result})
+        try:
+            planner_raw, planner_meta = call_model(client=client, model=config.models.planner_model, system_prompt=prompts['system_rules'], user_prompt=planner_prompt, think=config.ollama.think, config=config, step='planner')
+            planner_result = parse_planner_response(planner_raw.content)
+            _add_step(trace, 'planner', {'meta': _serialize_meta(planner_meta), 'prompt': planner_prompt, 'raw': planner_raw.raw, 'content': planner_raw.content, 'parsed': planner_result})
+        except Exception as e:
+            _add_step(trace, 'planner_error', {'prompt': planner_prompt, 'error': str(e)})
+            raise
 
-        coder_prompt = build_coder_user_prompt(prompts['coder_user_template'], request, planner_result)
-        coder_raw, coder_meta = call_model(client=client, model=config.models.coder_model, system_prompt=prompts['system_rules'], user_prompt=coder_prompt, think=config.ollama.think, config=config, step='coder')
-        code_result = parse_code_response(coder_raw.content)
-        _add_step(trace, 'coder', {'meta': _serialize_meta(coder_meta), 'prompt': coder_prompt, 'raw': coder_raw.raw, 'content': coder_raw.content, 'parsed': code_result})
+        coder_prompt, coder_context_metrics = build_coder_user_prompt(prompts['coder_user_template'], request, planner_result, config)
+        logger.info('coder context request_id=%s before=%s after=%s target_chars=%s full_file_chars=%s reference_chars=%s references=%s', request.request_id, coder_context_metrics.get('coder_prompt_chars_before_trim'), coder_context_metrics.get('coder_prompt_chars_after_trim'), coder_context_metrics.get('coder_target_chars'), coder_context_metrics.get('coder_full_file_chars'), coder_context_metrics.get('coder_reference_chars'), coder_context_metrics.get('reference_count'))
+        try:
+            coder_raw, coder_meta = call_model(client=client, model=config.models.coder_model, system_prompt=prompts['system_rules'], user_prompt=coder_prompt, think=config.ollama.think, config=config, step='coder')
+            code_result = parse_code_response(coder_raw.content)
+            _add_step(trace, 'coder', {'meta': _serialize_meta(coder_meta), 'prompt': coder_prompt, 'context_metrics': coder_context_metrics, 'raw': coder_raw.raw, 'content': coder_raw.content, 'parsed': code_result})
+        except Exception as e:
+            _add_step(trace, 'coder_error', {'prompt': coder_prompt, 'context_metrics': coder_context_metrics, 'error': str(e)})
+            raise
 
         code_artifact = CodeArtifact(operation=code_result['operation'], target_qualname=request.target.get('qualname',''), target_file=code_result['target_file'], code=code_result['code'], insert_after=code_result.get('insert_after'))
         warnings=[]

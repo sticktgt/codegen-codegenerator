@@ -33,6 +33,11 @@ codegenerator:
     max_repair_attempts: 1
     test_generation_mode: "always"
     test_generator_max_example_tests: 1
+    coder_prompt_target_chars: 5000
+    coder_prompt_hard_limit: 5400
+    coder_max_reference_artifacts: 1
+    coder_max_reference_chars: 650
+    coder_max_full_file_chars: 0
 
   defaults:
     constraints:
