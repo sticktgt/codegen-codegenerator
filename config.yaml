@@ -38,6 +38,8 @@ codegenerator:
     coder_max_reference_artifacts: 1
     coder_max_reference_chars: 650
     coder_max_full_file_chars: 0
+    repair_prompt_hard_limit: 5750
+    repair_max_reference_chars: 420
 
   defaults:
     constraints:

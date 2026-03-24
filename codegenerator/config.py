@@ -67,6 +67,8 @@ class RuntimeConfig:
     coder_max_reference_artifacts: int
     coder_max_reference_chars: int
     coder_max_full_file_chars: int
+    repair_prompt_hard_limit: int
+    repair_max_reference_chars: int
     trace: TraceSettings
     config_path: str
 
@@ -188,6 +190,8 @@ def load_config(config_path: str | Path | None = None) -> RuntimeConfig:
         coder_max_reference_artifacts=int(generation_cfg.get('coder_max_reference_artifacts', 1)),
         coder_max_reference_chars=int(generation_cfg.get('coder_max_reference_chars', 650)),
         coder_max_full_file_chars=int(generation_cfg.get('coder_max_full_file_chars', 0)),
+        repair_prompt_hard_limit=int(generation_cfg.get('repair_prompt_hard_limit', 5750)),
+        repair_max_reference_chars=int(generation_cfg.get('repair_max_reference_chars', 420)),
         trace=TraceSettings(
             save_to_file=bool(trace_cfg.get('save_to_file', True)),
             show_prompts=bool(trace_cfg.get('show_prompts', True)),

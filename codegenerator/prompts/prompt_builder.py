@@ -154,14 +154,38 @@ def build_coder_user_prompt(template_text: str, request: GenerationRequest, plan
     return prompt, metrics
 
 
-def build_repair_user_prompt(template_text: str, request: RepairRequest) -> str:
+def build_repair_user_prompt(template_text: str, request: RepairRequest, runtime_config: RuntimeConfig | None = None) -> str:
     project_context = request.project_context or {}
     target_symbol = project_context.get('target_symbol') or {}
     module_outline = project_context.get('module_outline', [])
-    full_file_source = project_context.get('full_file_source', '')
+    full_file_source = str(project_context.get('full_file_source', '') or '')
     change_request = request.change_request or {}
     change_request_text = ((change_request.get('title', '') + '\n' + change_request.get('description', '')).strip() or 'repair request')
     constraints = change_request.get('constraints', []) or []
+
+    target_source = str(target_symbol.get('source', '') or '')
+    target_source, _ = _truncate_text(target_source, 900)
+    module_outline_text = _render_module_outline(module_outline)
+    previous_code = str(request.previous_artifact.get('code', '') or '')
+    previous_code, _ = _truncate_text(previous_code, 1200)
+    if runtime_config and runtime_config.coder_max_full_file_chars <= 0:
+        full_file_source = ''
+    elif full_file_source:
+        full_file_source, _ = _truncate_text(full_file_source, 700)
+
+    reference_context = request.reference_context or {}
+    compact_reference = {
+        'reference_summary': reference_context.get('reference_summary', {}),
+        'reference_artifacts': [
+            {
+                'title': item.get('title', ''),
+                'usage_mode': item.get('usage_mode', ''),
+                'content_mode': item.get('content_mode', ''),
+                'content': _truncate_text(str(item.get('content', '') or ''), (runtime_config.repair_max_reference_chars if runtime_config else 420))[0],
+            }
+            for item in list(reference_context.get('reference_artifacts') or [])[:1]
+        ],
+    }
 
     values = {
         'operation': request.previous_artifact.get('operation', 'replace_symbol'),
@@ -172,27 +196,14 @@ def build_repair_user_prompt(template_text: str, request: RepairRequest) -> str:
         'planner_json': _pretty({'repair_for': request.previous_generation_request_id, 'change_request': change_request}),
         'verification_summary': _pretty(request.error_context),
         'verification_summary_json': _pretty(request.error_context),
-        'module_outline': _pretty(module_outline),
-        'target_function': _pretty(target_symbol),
+        'module_outline': module_outline_text,
+        'target_function': target_source or _pretty({k: v for k, v in target_symbol.items() if k != 'source'}),
         'full_file_source': full_file_source,
-        'current_generated_code': request.previous_artifact.get('code', ''),
-        'module_outline_block': '\n\nModule outline:\n' + _pretty(module_outline) if module_outline else '',
-        'target_function_block': '\n\nTarget function:\n' + _pretty(target_symbol) if target_symbol else '',
+        'current_generated_code': previous_code,
+        'module_outline_block': '\n\nModule outline:\n' + module_outline_text if module_outline_text else '',
+        'target_function_block': '\n\nTarget function:\n' + (target_source or _pretty({k: v for k, v in target_symbol.items() if k != 'source'})) if target_symbol else '',
         'reference_function_block': '',
         'full_file_source_block': '\n\nFull file source:\n' + full_file_source if full_file_source else '',
-    }
-    reference_context = request.reference_context or {}
-    compact_reference = {
-        'reference_summary': reference_context.get('reference_summary', {}),
-        'reference_artifacts': [
-            {
-                'title': item.get('title', ''),
-                'usage_mode': item.get('usage_mode', ''),
-                'content_mode': item.get('content_mode', ''),
-                'content': item.get('content', ''),
-            }
-            for item in list(reference_context.get('reference_artifacts') or [])[:1]
-        ],
     }
     extra = [
         'Change request to preserve:',
@@ -202,23 +213,40 @@ def build_repair_user_prompt(template_text: str, request: RepairRequest) -> str:
         _pretty(constraints),
         '',
         'Repair instruction:',
-        'Fix the generated code so it becomes valid and keeps the requested change. Do not revert to the original implementation unless the change request explicitly asks for that.',
+        'Fix the generated code so it becomes valid and keeps the requested change. Do not revert to the original implementation and do not weaken the requested behavior.',
         '',
         'Reference context:',
         _pretty(compact_reference),
     ]
-    return template_text.format(**values) + '\n\n' + '\n'.join(extra)
+    prompt = template_text.format(**values) + '\n\n' + '\n'.join(extra)
+    if runtime_config and len(prompt) > runtime_config.repair_prompt_hard_limit:
+        compact_reference['reference_artifacts'] = []
+        extra[-1] = _pretty(compact_reference)
+        prompt = template_text.format(**values) + '\n\n' + '\n'.join(extra)
+    if runtime_config and len(prompt) > runtime_config.repair_prompt_hard_limit:
+        values['module_outline_block'] = ''
+        values['full_file_source_block'] = ''
+        prompt = template_text.format(**values) + '\n\n' + '\n'.join(extra)
+    return prompt
 
 def build_test_generator_user_prompt(template_text: str, request: GenerationRequest, planner_result: dict[str, Any], generated_test_file: str, example_test_source: str) -> str:
     pc = request.project_context or {}
+    target_symbol = pc.get('target_symbol') or {}
+    target_source = str(target_symbol.get('source', '') or '')
+    module_outline_text = _render_module_outline(pc.get('module_outline', []))
+    example_block = f"\n\nExample test:\n{example_test_source}" if example_test_source else ''
     return template_text.format(
         operation=request.target.get('operation', 'replace_symbol'),
         target_file=request.target.get('file_path', ''),
         target_symbol=request.target.get('qualname', ''),
         planner_json=_pretty(planner_result),
+        planner_result_json=_pretty(planner_result),
         request=((request.change_request.get('title', '') + "\n" + request.change_request.get('description', '')).strip()),
         module_outline=_pretty(pc.get('module_outline', [])),
+        module_outline_block=(f"\n\nModule outline:\n{module_outline_text}" if module_outline_text else ''),
+        target_function_block=(f"\n\nTarget function:\n{target_source}" if target_source else ''),
         full_file_source=pc.get('full_file_source', ''),
         generated_test_file=generated_test_file,
         example_test_source=example_test_source,
+        example_test_block=example_block,
     )

@@ -69,6 +69,7 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
         mode = str(request.options.get('generate_test_mode', config.test_generation_mode))
         if mode == 'always' or (mode == 'if_missing' and not request.project_context.get('related_tests')):
             expected_test_file = build_generated_test_filename(request)
+            logger.info('test generation request_id=%s mode=%s expected_test=%s', request.request_id, mode, expected_test_file)
             test_prompt = build_test_generator_user_prompt(prompts['test_generator_user_template'], request, planner_result, expected_test_file, prompts['test_generator_example_source'])
             test_raw, test_meta = call_model(client=client, model=config.models.test_generator_model, system_prompt=prompts['system_rules'], user_prompt=test_prompt, think=config.ollama.think, config=config, step='test_generator')
             test_result = parse_test_response(test_raw.content, expected_test_file)
@@ -84,6 +85,37 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
         save_trace(trace_path, trace)
         return GenerationResult(request_id=request.request_id, status='error', trace_path=str(trace_path), error_type=type(e).__name__, message=str(e))
 
+
+
+def generate_test(request: GenerationRequest, config_path: str) -> GenerationResult:
+    config = load_config(config_path)
+    prompts = load_prompts(config)
+    client = create_client(config)
+    trace = _base_trace(request.request_id, 'generate_test')
+    trace_path = build_trace_path(config.trace.output_dir, request.request_id)
+    try:
+        planner_prompt = build_planner_user_prompt(prompts['planner_user_template'], request, config.defaults_constraints)
+        logger.info('generate_test request_id=%s models planner=%s test=%s', request.request_id, config.models.planner_model, config.models.test_generator_model)
+        planner_raw, planner_meta = call_model(client=client, model=config.models.planner_model, system_prompt=prompts['system_rules'], user_prompt=planner_prompt, think=config.ollama.think, config=config, step='planner')
+        planner_result = parse_planner_response(planner_raw.content)
+        _add_step(trace, 'planner', {'meta': _serialize_meta(planner_meta), 'prompt': planner_prompt, 'raw': planner_raw.raw, 'content': planner_raw.content, 'parsed': planner_result})
+
+        expected_test_file = build_generated_test_filename(request)
+        test_prompt = build_test_generator_user_prompt(prompts['test_generator_user_template'], request, planner_result, expected_test_file, prompts['test_generator_example_source'])
+        test_raw, test_meta = call_model(client=client, model=config.models.test_generator_model, system_prompt=prompts['system_rules'], user_prompt=test_prompt, think=config.ollama.think, config=config, step='test_generator')
+        test_result = parse_test_response(test_raw.content, expected_test_file)
+        test_artifact = TestArtifact(file_path=test_result['test_file'], source_code=test_result['code'])
+        _add_step(trace, 'test_generator', {'meta': _serialize_meta(test_meta), 'prompt': test_prompt, 'raw': test_raw.raw, 'content': test_raw.content, 'parsed': test_result})
+        result = GenerationResult(request_id=request.request_id, status='ok', test_artifact=test_artifact, planner_result=planner_result, trace_path=str(trace_path))
+        trace['result'] = result.to_dict()
+        save_trace(trace_path, trace)
+        return result
+    except Exception as e:
+        logger.exception('generate_test failed')
+        trace['error']={'type': type(e).__name__, 'message': str(e)}
+        save_trace(trace_path, trace)
+        return GenerationResult(request_id=request.request_id, status='error', trace_path=str(trace_path), error_type=type(e).__name__, message=str(e))
+
 def repair(request: RepairRequest, config_path: str) -> GenerationResult:
     config = load_config(config_path)
     prompts = load_prompts(config)
@@ -91,7 +123,7 @@ def repair(request: RepairRequest, config_path: str) -> GenerationResult:
     trace = _base_trace(request.request_id, 'repair')
     trace_path = build_trace_path(config.trace.output_dir, request.request_id)
     try:
-        repair_prompt = build_repair_user_prompt(prompts['repair_user_template'], request)
+        repair_prompt = build_repair_user_prompt(prompts['repair_user_template'], request, config)
         logger.info('repair request_id=%s model=%s', request.request_id, config.models.repair_model)
         repair_raw, repair_meta = call_model(client=client, model=config.models.repair_model, system_prompt=prompts['system_rules'], user_prompt=repair_prompt, think=config.ollama.think, config=config, step='repair')
         try:
