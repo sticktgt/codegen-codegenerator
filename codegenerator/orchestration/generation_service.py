@@ -41,7 +41,8 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
     trace_path = build_trace_path(config.trace.output_dir, request.request_id)
     try:
         planner_prompt = build_planner_user_prompt(prompts['planner_user_template'], request, config.defaults_constraints)
-        logger.info('generate request_id=%s models planner=%s coder=%s test=%s repair=%s test_mode=%s', request.request_id, config.models.planner_model, config.models.coder_model, config.models.test_generator_model, config.models.repair_model, config.test_generation_mode)
+        requested_test_mode = str(request.options.get('generate_test_mode', config.test_generation_mode))
+        logger.info('generate request_id=%s models planner=%s coder=%s test=%s repair=%s test_mode=%s', request.request_id, config.models.planner_model, config.models.coder_model, config.models.test_generator_model, config.models.repair_model, requested_test_mode)
         try:
             planner_raw, planner_meta = call_model(client=client, model=config.models.planner_model, system_prompt=prompts['system_rules'], user_prompt=planner_prompt, think=config.ollama.think, config=config, step='planner')
             planner_result = parse_planner_response(planner_raw.content)
