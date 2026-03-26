@@ -13,6 +13,7 @@ class GenerationRequest(RequestBase):
     target: dict[str, Any]
     project_context: dict[str, Any]
     reference_context: dict[str, Any] = field(default_factory=dict)
+    generated_code_artifact: dict[str, Any] = field(default_factory=dict)
     options: dict[str, Any] = field(default_factory=dict)
     context_metrics: dict[str, Any] = field(default_factory=dict)
 

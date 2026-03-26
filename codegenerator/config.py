@@ -51,6 +51,11 @@ class TraceSettings:
     show_raw_llm_output: bool
     output_dir: str
 
+@dataclass(slots=True)
+class PromptBudgetSettings:
+    generate_chars_limit: int
+    generate_test_chars_limit: int
+    repair_chars_limit: int
 
 @dataclass(slots=True)
 class RuntimeConfig:
@@ -70,6 +75,7 @@ class RuntimeConfig:
     repair_prompt_hard_limit: int
     repair_max_reference_chars: int
     trace: TraceSettings
+    prompt_budget: PromptBudgetSettings
     config_path: str
 
 
@@ -162,6 +168,7 @@ def load_config(config_path: str | Path | None = None) -> RuntimeConfig:
     generation_cfg = cg.get('generation') or {}
     defaults_cfg = cg.get('defaults') or {}
     trace_cfg = cg.get('trace') or {}
+    prompt_budget_cfg = cg.get('prompt_budget') or {}
     return RuntimeConfig(
         ollama=OllamaSettings(
             base_url=str(oll.get('base_url', '')).strip(),
@@ -197,6 +204,11 @@ def load_config(config_path: str | Path | None = None) -> RuntimeConfig:
             show_prompts=bool(trace_cfg.get('show_prompts', True)),
             show_raw_llm_output=bool(trace_cfg.get('show_raw_llm_output', True)),
             output_dir=str(trace_cfg.get('output_dir', 'runs')),
+        ),
+        prompt_budget=PromptBudgetSettings(
+            generate_chars_limit=int(prompt_budget_cfg.get('generate_chars_limit', 5600)),
+            generate_test_chars_limit=int(prompt_budget_cfg.get('generate_test_chars_limit', 5400)),
+            repair_chars_limit=int(prompt_budget_cfg.get('repair_chars_limit', 5600)),
         ),
         config_path=str(path),
     )

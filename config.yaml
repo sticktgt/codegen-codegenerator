@@ -53,3 +53,8 @@ codegenerator:
     show_prompts: true
     show_raw_llm_output: true
     output_dir: "runs"
+
+  prompt_budget:
+    generate_chars_limit: 5600
+    generate_test_chars_limit: 5400
+    repair_chars_limit: 5600    
