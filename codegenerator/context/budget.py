@@ -87,19 +87,40 @@ def _trim_module_outline(request: dict[str, Any], keep: int, trim_log: list[str]
 def _trim_related_tests(request: dict[str, Any], keep: int, source_limit: int, trim_log: list[str]) -> None:
     project_context = request.setdefault("project_context", {})
     related_tests = project_context.get("related_tests", []) or []
+    original_count = len(related_tests)
+
     if len(related_tests) > keep:
         trim_log.append(f"trimmed related_tests count: {len(related_tests)} -> {keep}")
         related_tests = related_tests[:keep]
 
-    updated: list[dict[str, Any]] = []
+    if keep <= 0 or source_limit <= 0:
+        if related_tests:
+            trim_log.append(f"removed related_tests content: {len(related_tests)} -> 0")
+        project_context["related_tests"] = []
+        return
+
+    kept_items: list[dict[str, Any]] = []
+    removed_for_size = 0
+    removed_chars = 0
     for item in related_tests:
-        source, truncated = _truncate_text(str(item.get("source", "")), source_limit)
+        source = str(item.get("source", ""))
+        if source_limit > 0 and len(source) > source_limit:
+            removed_for_size += 1
+            removed_chars += len(source)
+            continue
         new_item = dict(item)
         new_item["source"] = source
-        new_item["truncated"] = truncated
-        updated.append(new_item)
+        new_item["truncated"] = False
+        kept_items.append(new_item)
 
-    project_context["related_tests"] = updated
+    if removed_for_size:
+        trim_log.append(
+            f"removed oversized related_tests: {len(kept_items) + removed_for_size} -> {len(kept_items)}, removed_chars={removed_chars}, per_test_limit={source_limit}"
+        )
+    elif original_count != len(kept_items):
+        trim_log.append(f"trimmed related_tests count: {original_count} -> {len(kept_items)}")
+
+    project_context["related_tests"] = kept_items
 
 
 def _trim_target_source(request: dict[str, Any], source_limit: int, trim_log: list[str]) -> None:
@@ -170,10 +191,10 @@ def apply_budget_strategy(
     metrics_before = _context_metrics_from_request(request)
 
     if mode == "generate_test":
-        # Только пример теста, никаких "общих" reference_artifacts
-        _keep_single_test_example(request, trim_log)
-        _trim_module_outline(request, keep=3, trim_log=trim_log)
-        _trim_related_tests(request, keep=0, source_limit=0, trim_log=trim_log)
+        # Для генерации тестов полезнее существующие project tests, чем общие reference snippets.
+        _drop_all_reference_artifacts(request, trim_log)
+        _trim_module_outline(request, keep=2, trim_log=trim_log)
+        _trim_related_tests(request, keep=1, source_limit=500, trim_log=trim_log)
 
     elif mode == "repair":
         # Repair должен быть максимально коротким

@@ -54,6 +54,40 @@ def _render_target_symbol(target_symbol: dict[str, Any]) -> str:
     return _pretty({k: v for k, v in target_symbol.items() if k != "source"})
 
 
+
+
+def _render_related_tests(
+    project_context: dict[str, Any],
+    max_items: int,
+    per_item_chars: int,
+) -> tuple[str, dict[str, Any]]:
+    tests = list(project_context.get("related_tests") or [])[:max_items]
+    blocks: list[str] = []
+    total_chars = 0
+    qualnames: list[str] = []
+
+    for item in tests:
+        raw_source = str(item.get("source", "") or "")
+        if not raw_source:
+            continue
+        source = raw_source
+        if per_item_chars > 0 and len(source) > per_item_chars:
+            source, _ = _truncate_text(source, per_item_chars)
+        qualname = str(item.get("qualname", "") or item.get("name", "") or "")
+        file_path = str(item.get("file_path", "") or "")
+        kind = str(item.get("kind", "") or "")
+        header = f"Qualname: {qualname}\nFile: {file_path}\nKind: {kind}".strip()
+        blocks.append(f"{header}\nCode:\n{source}")
+        qualnames.append(qualname)
+        total_chars += len(source)
+
+    rendered = "\n\n---\n\n".join(blocks) if blocks else "none"
+    metrics = {
+        "related_tests_count": len(blocks),
+        "related_test_chars": total_chars,
+        "related_test_qualnames": qualnames,
+    }
+    return rendered, metrics
 def _render_reference_artifacts(
     reference_context: dict[str, Any],
     max_items: int,
@@ -80,7 +114,7 @@ def _render_reference_artifacts(
 
     rendered = "\n\n---\n\n".join(blocks) if blocks else "none"
     metrics = {
-        "reference_count": len(artifacts),
+        "reference_count": len(blocks),
         "reference_chars": total_chars,
         "reference_titles": titles,
         "reference_content_modes": content_modes,
@@ -93,6 +127,7 @@ def _build_coder_prompt_metrics(
     target_text: str,
     full_file_text: str,
     reference_text: str,
+    related_tests_text: str,
     before_trim: int,
     after_trim: int,
 ) -> dict[str, Any]:
@@ -102,8 +137,8 @@ def _build_coder_prompt_metrics(
         "coder_target_chars": len(target_text),
         "coder_full_file_chars": len(full_file_text),
         "coder_reference_chars": _reference_text_chars(reference_text),
+        "coder_related_test_chars": 0 if related_tests_text == "none" else len(related_tests_text),
     }
-
 
 def _render_constraints_block(constraints: list[str], limit: int = 6) -> str:
     if not constraints:
@@ -199,6 +234,11 @@ def build_coder_user_prompt(
         runtime_config.coder_max_reference_artifacts,
         runtime_config.coder_max_reference_chars,
     )
+    related_tests_text, related_test_metrics = _render_related_tests(
+        pc,
+        max_items=1,
+        per_item_chars=450,
+    )
 
     compact_request_text = _compact_change_request_for_codegen(
         request.change_request,
@@ -210,9 +250,10 @@ def build_coder_user_prompt(
         target_value: str,
         full_file_value: str,
         reference_value: str,
+        related_tests_value: str,
         request_value: str,
     ) -> str:
-        return template_text.format(
+        prompt = template_text.format(
             operation=request.target.get("operation", "replace_symbol"),
             target_file=request.target.get("file_path", ""),
             target_symbol=request.target.get("qualname", ""),
@@ -225,12 +266,16 @@ def build_coder_user_prompt(
             reference_function=reference_value,
             full_file_source=full_file_value,
         )
+        if related_tests_value != "none":
+            prompt += "\n\nRelated tests:\n" + related_tests_value
+        return prompt
 
     initial_prompt = _render(
         module_outline_text,
         target_text,
         full_file_text,
         reference_text,
+        related_tests_text,
         compact_request_text,
     )
     before_trim = len(initial_prompt)
@@ -242,8 +287,26 @@ def build_coder_user_prompt(
         target_text,
         full_file_text,
         reference_text,
+        related_tests_text,
         compact_request_text,
     )
+
+    if len(prompt) > runtime_config.coder_prompt_target_chars and related_tests_text != "none":
+        related_tests_text = "none"
+        related_test_metrics = {
+            **related_test_metrics,
+            "related_tests_count": 0,
+            "related_test_chars": 0,
+            "related_test_qualnames": [],
+        }
+        prompt = _render(
+            module_outline_text,
+            target_text,
+            full_file_text,
+            reference_text,
+            related_tests_text,
+            compact_request_text,
+        )
 
     if len(prompt) > runtime_config.coder_prompt_target_chars and reference_text != "none":
         reference_text = "none"
@@ -259,6 +322,7 @@ def build_coder_user_prompt(
             target_text,
             full_file_text,
             reference_text,
+            related_tests_text,
             compact_request_text,
         )
 
@@ -269,6 +333,7 @@ def build_coder_user_prompt(
             target_text,
             full_file_text,
             reference_text,
+            related_tests_text,
             compact_request_text,
         )
 
@@ -282,6 +347,7 @@ def build_coder_user_prompt(
             target_text,
             full_file_text,
             reference_text,
+            related_tests_text,
             compact_request_text,
         )
 
@@ -299,6 +365,7 @@ def build_coder_user_prompt(
             target_text,
             full_file_text,
             reference_text,
+            related_tests_text,
             compact_request_text,
         )
 
@@ -318,16 +385,7 @@ def build_coder_user_prompt(
             target_text,
             full_file_text,
             reference_text,
-            compact_request_text,
-        )
-
-    if len(prompt) > runtime_limit and module_outline_text != "[]":
-        module_outline_text, _ = _truncate_text(module_outline_text, 180)
-        prompt = _render(
-            module_outline_text,
-            target_text,
-            full_file_text,
-            reference_text,
+            related_tests_text,
             compact_request_text,
         )
 
@@ -341,6 +399,7 @@ def build_coder_user_prompt(
             target_text,
             full_file_text,
             reference_text,
+            related_tests_text,
             compact_request_text,
         )
 
@@ -354,6 +413,54 @@ def build_coder_user_prompt(
             target_text,
             full_file_text,
             reference_text,
+            related_tests_text,
+            compact_request_text,
+        )
+
+    if len(prompt) > runtime_limit and module_outline_text != "[]":
+        module_outline_text, _ = _truncate_text(module_outline_text, 120)
+        prompt = _render(
+            module_outline_text,
+            target_text,
+            full_file_text,
+            reference_text,
+            related_tests_text,
+            compact_request_text,
+        )
+
+    if len(prompt) > runtime_limit and related_tests_text != "none":
+        related_tests_text, _ = _truncate_text(
+            related_tests_text,
+            max(180, runtime_limit // 10),
+        )
+        prompt = _render(
+            module_outline_text,
+            target_text,
+            full_file_text,
+            reference_text,
+            related_tests_text,
+            compact_request_text,
+        )
+
+    if len(prompt) > runtime_limit:
+        compact_request_text, _ = _truncate_text(compact_request_text, 160)
+        prompt = _render(
+            module_outline_text,
+            target_text,
+            full_file_text,
+            reference_text,
+            related_tests_text,
+            compact_request_text,
+        )
+
+    if len(prompt) > runtime_limit:
+        target_text, _ = _truncate_text(target_text, 160)
+        prompt = _render(
+            module_outline_text,
+            target_text,
+            full_file_text,
+            reference_text,
+            related_tests_text,
             compact_request_text,
         )
 
@@ -362,12 +469,13 @@ def build_coder_user_prompt(
         target_text,
         full_file_text,
         reference_text,
+        related_tests_text,
         before_trim,
         len(prompt),
     )
     metrics.update(ref_metrics)
+    metrics.update(related_test_metrics)
     return prompt, metrics
-
 
 def build_repair_user_prompt(
     template_text: str,
@@ -503,12 +611,18 @@ def build_test_generator_user_prompt(
         target_source_origin = "project_context.target_symbol"
 
     example_text, _ = _truncate_text(example_test_source or "", 700)
+    related_tests_text, related_test_metrics = _render_related_tests(
+        pc,
+        max_items=1,
+        per_item_chars=500,
+    )
 
     def _render(
         *,
         request_value: str,
         target_function_value: str,
         example_value: str,
+        related_tests_value: str,
     ) -> str:
         example_block = f"\n\nExample test:\n{example_value}" if example_value else ""
         target_block = (
@@ -516,7 +630,12 @@ def build_test_generator_user_prompt(
             if target_function_value
             else ""
         )
-        return template_text.format(
+        related_tests_block = (
+            f"\n\nExisting related tests:\n{related_tests_value}"
+            if related_tests_value and related_tests_value != "none"
+            else ""
+        )
+        prompt = template_text.format(
             operation=request.target.get("operation", "replace_symbol"),
             target_file=request.target.get("file_path", ""),
             target_symbol=request.target.get("qualname", ""),
@@ -531,11 +650,13 @@ def build_test_generator_user_prompt(
             example_test_source=example_value,
             example_test_block=example_block,
         )
+        return prompt + related_tests_block
 
     prompt = _render(
         request_value=compact_request_text,
         target_function_value=target_source,
         example_value=example_text,
+        related_tests_value=related_tests_text,
     )
     before_trim = len(prompt)
 
@@ -545,6 +666,22 @@ def build_test_generator_user_prompt(
             request_value=compact_request_text,
             target_function_value=target_source,
             example_value=example_text,
+            related_tests_value=related_tests_text,
+        )
+
+    if len(prompt) > available_user_chars and related_tests_text != "none":
+        related_tests_text = "none"
+        related_test_metrics = {
+            **related_test_metrics,
+            "related_tests_count": 0,
+            "related_test_chars": 0,
+            "related_test_qualnames": [],
+        }
+        prompt = _render(
+            request_value=compact_request_text,
+            target_function_value=target_source,
+            example_value=example_text,
+            related_tests_value=related_tests_text,
         )
 
     if len(prompt) > available_user_chars:
@@ -553,6 +690,7 @@ def build_test_generator_user_prompt(
             request_value=compact_request_text,
             target_function_value=target_source,
             example_value=example_text,
+            related_tests_value=related_tests_text,
         )
 
     if len(prompt) > available_user_chars:
@@ -563,6 +701,30 @@ def build_test_generator_user_prompt(
             request_value=compact_request_text,
             target_function_value=target_source,
             example_value=example_text,
+            related_tests_value=related_tests_text,
+        )
+
+    if len(prompt) > available_user_chars and related_tests_text != "none":
+        related_tests_text, _ = _truncate_text(
+            related_tests_text,
+            max(180, available_user_chars // 10),
+        )
+        prompt = _render(
+            request_value=compact_request_text,
+            target_function_value=target_source,
+            example_value=example_text,
+            related_tests_value=related_tests_text,
+        )
+
+    if len(prompt) > available_user_chars:
+        compact_request_text, _ = _truncate_text(compact_request_text, 160)
+        target_source, _ = _truncate_text(target_source, 420)
+        example_text, _ = _truncate_text(example_text, 120)
+        prompt = _render(
+            request_value=compact_request_text,
+            target_function_value=target_source,
+            example_value=example_text,
+            related_tests_value=related_tests_text,
         )
 
     metrics = {
@@ -572,5 +734,8 @@ def build_test_generator_user_prompt(
         "test_example_chars": len(example_text),
         "test_request_chars": len(compact_request_text),
         "test_target_source_origin": target_source_origin,
+        "test_related_tests_count": related_test_metrics.get("related_tests_count", 0),
+        "test_related_test_chars": related_test_metrics.get("related_test_chars", 0),
+        "test_related_test_qualnames": related_test_metrics.get("related_test_qualnames", []),
     }
     return prompt, metrics

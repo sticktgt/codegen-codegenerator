@@ -57,12 +57,17 @@ def _available_user_chars(limit: int, system_prompt: str) -> int:
     return max(400, available - 100)
 
 
-def _enforce_prompt_limit(step: str, user_prompt: str, system_prompt: str, total_limit: int) -> None:
+def _enforce_prompt_limit(step: str, user_prompt: str, system_prompt: str, total_limit: int) -> bool:
     prompt_chars = len(user_prompt) + len(system_prompt)
     if prompt_chars > total_limit:
-        raise ValueError(
-            f"{step} prompt exceeds total limit: total_prompt_chars={prompt_chars} total_limit={total_limit}"
+        logger.warning(
+            "%s prompt exceeds soft total limit: total_prompt_chars=%s total_limit=%s; continuing with best-effort request",
+            step,
+            prompt_chars,
+            total_limit,
         )
+        return False
+    return True
 
 
 def _add_budget_step(
@@ -345,12 +350,14 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
             available_user_chars=available_user_chars,
         )
         logger.info(
-            "coder context request_id=%s before=%s after=%s target_chars=%s full_file_chars=%s reference_chars=%s reference_count=%s",
+            "coder context request_id=%s before=%s after=%s target_chars=%s full_file_chars=%s related_test_chars=%s related_tests_count=%s reference_chars=%s reference_count=%s",
             request.request_id,
             coder_context_metrics.get("coder_prompt_chars_before_trim"),
             coder_context_metrics.get("coder_prompt_chars_after_trim"),
             coder_context_metrics.get("coder_target_chars"),
             coder_context_metrics.get("coder_full_file_chars"),
+            coder_context_metrics.get("coder_related_test_chars"),
+            coder_context_metrics.get("related_tests_count"),
             coder_context_metrics.get("coder_reference_chars"),
             coder_context_metrics.get("reference_count"),
         )
@@ -433,13 +440,15 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
             )
 
             logger.info(
-                "test_generator context request_id=%s before=%s after=%s target_chars=%s example_chars=%s request_chars=%s source=%s",
+                "test_generator context request_id=%s before=%s after=%s target_chars=%s example_chars=%s request_chars=%s related_test_chars=%s related_tests_count=%s source=%s",
                 test_request.request_id,
                 test_context_metrics.get("test_prompt_chars_before_trim"),
                 test_context_metrics.get("test_prompt_chars_after_trim"),
                 test_context_metrics.get("test_target_chars"),
                 test_context_metrics.get("test_example_chars"),
                 test_context_metrics.get("test_request_chars"),
+                test_context_metrics.get("test_related_test_chars"),
+                test_context_metrics.get("test_related_tests_count"),
                 test_context_metrics.get("test_target_source_origin"),
             )
 
