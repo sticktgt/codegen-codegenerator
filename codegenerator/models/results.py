@@ -12,6 +12,7 @@ class GenerationResult:
     planner_result: dict[str, Any] | None = None
     warnings: list[str] = field(default_factory=list)
     trace_path: str | None = None
+    llm_usage: dict[str, Any] | None = None
     error_type: str | None = None
     message: str | None = None
     def to_dict(self) -> dict[str, Any]:
@@ -23,6 +24,7 @@ class GenerationResult:
             'planner_result': self.planner_result,
             'warnings': self.warnings,
             'trace_path': self.trace_path,
+            'llm_usage': self.llm_usage,
             'error_type': self.error_type,
             'message': self.message,
         }

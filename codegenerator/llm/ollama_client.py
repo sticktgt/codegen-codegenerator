@@ -1,5 +1,5 @@
 # llm/ollama_client.py
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional
 import time
 import requests
@@ -18,6 +18,19 @@ class OllamaCallResult:
     done: bool
     done_reason: str
     duration_sec: float
+    total_duration_sec: float
+    load_duration_sec: float
+    prompt_eval_duration_sec: float
+    eval_duration_sec: float
+
+    def usage_dict(self) -> Dict[str, Any]:
+        payload = asdict(self)
+        payload.pop('content', None)
+        payload.pop('raw', None)
+        payload.pop('done', None)
+        payload.pop('done_reason', None)
+        payload['total_tokens'] = self.prompt_tokens + self.output_tokens
+        return payload
 
 
 class OllamaClient:
@@ -85,8 +98,17 @@ class OllamaClient:
 
             # token/s (как в документации Ollama: eval_count / eval_duration * 1e9) :contentReference[oaicite:1]{index=1}
             tps = (ec / ev * 1e9) if ev else 0.0
-            logger.info("timing total=%.2fs load=%.2fs prompt=%.2fs eval=%.2fs tok/s=%.2f",
-                total/1e9, load/1e9, pe/1e9, ev/1e9, tps)
+            logger.info(
+                "ollama usage prompt_tokens=%s output_tokens=%s total_tokens=%s total=%.2fs load=%.2fs prompt=%.2fs eval=%.2fs tok/s=%.2f",
+                pc,
+                ec,
+                int(pc) + int(ec),
+                total / 1e9,
+                load / 1e9,
+                pe / 1e9,
+                ev / 1e9,
+                tps,
+            )
 
         except requests.RequestException as e:
             logger.exception("Ollama request failed")
@@ -108,4 +130,8 @@ class OllamaClient:
             done=bool(data.get("done", True)),
             done_reason=str(data.get("done_reason", "")),
             duration_sec=(t1 - t0),
+            total_duration_sec=float(data.get("total_duration", 0)) / 1e9,
+            load_duration_sec=float(data.get("load_duration", 0)) / 1e9,
+            prompt_eval_duration_sec=float(data.get("prompt_eval_duration", 0)) / 1e9,
+            eval_duration_sec=float(data.get("eval_duration", 0)) / 1e9,
         )

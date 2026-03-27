@@ -1,6 +1,8 @@
 # codegenerator/orchestration/generation_service.py
 from __future__ import annotations
 
+import json
+
 from dataclasses import asdict, is_dataclass
 from typing import Any, Callable
 
@@ -55,11 +57,11 @@ def _available_user_chars(limit: int, system_prompt: str) -> int:
     return max(400, available - 100)
 
 
-def _enforce_prompt_limit(step: str, prompt: str, limit: int) -> None:
-    prompt_chars = len(prompt)
-    if prompt_chars > limit:
+def _enforce_prompt_limit(step: str, user_prompt: str, system_prompt: str, total_limit: int) -> None:
+    prompt_chars = len(user_prompt) + len(system_prompt)
+    if prompt_chars > total_limit:
         raise ValueError(
-            f"{step} prompt exceeds limit: prompt_chars={prompt_chars} limit={limit}"
+            f"{step} prompt exceeds total limit: total_prompt_chars={prompt_chars} total_limit={total_limit}"
         )
 
 
@@ -87,6 +89,20 @@ def _request_from_trimmed_dict(request_cls: type, payload: dict[str, Any]):
     return request_cls(**clean_payload)
 
 
+
+
+def _derive_trim_steps(before_metrics: dict[str, Any], after_metrics: dict[str, Any], trim_log: list[str]) -> list[str]:
+    if trim_log:
+        return trim_log
+    steps: list[str] = []
+    keys = sorted(set(before_metrics) | set(after_metrics))
+    for key in keys:
+        before_value = before_metrics.get(key)
+        after_value = after_metrics.get(key)
+        if before_value != after_value:
+            steps.append(f"{key}:{before_value}->{after_value}")
+    return steps
+
 def _prepare_request_with_budget(
     *,
     request: GenerationRequest | RepairRequest,
@@ -97,15 +113,18 @@ def _prepare_request_with_budget(
     trace: dict[str, Any],
 ):
     request_dict = asdict(request)
+    request_chars_before = len(json.dumps(request_dict, ensure_ascii=False))
     available_user_chars = _available_user_chars(total_limit, system_prompt)
+    context_metrics_before = dict(request_dict.get("context_metrics", {}) or {})
 
     logger.info(
-        "%s budget request_id=%s total_limit=%s system_chars=%s available_user_chars=%s",
+        "%s budget request_id=%s total_prompt_limit=%s system_prompt_chars=%s available_user_prompt_chars=%s request_payload_chars_before=%s",
         mode,
         request.request_id,
         total_limit,
         len(system_prompt),
         available_user_chars,
+        request_chars_before,
     )
 
     request_dict, trim_log = apply_budget_strategy(
@@ -114,9 +133,20 @@ def _prepare_request_with_budget(
         request_chars_limit=available_user_chars,
         logger=logger,
     )
+    context_metrics_after = dict(request_dict.get("context_metrics", {}) or {})
+    trim_steps = _derive_trim_steps(context_metrics_before, context_metrics_after, trim_log)
     typed_request = _request_from_trimmed_dict(request_cls, request_dict)
-    _add_budget_step(trace, mode, request_dict, trim_log)
-    return typed_request, request_dict, trim_log, available_user_chars
+    request_chars_after = len(json.dumps(request_dict, ensure_ascii=False))
+    logger.info(
+        "%s budget request_id=%s request_payload_chars_after=%s available_user_prompt_chars=%s trim_steps=%s",
+        mode,
+        request.request_id,
+        request_chars_after,
+        available_user_chars,
+        trim_steps,
+    )
+    _add_budget_step(trace, mode, request_dict, trim_steps)
+    return typed_request, request_dict, trim_steps, available_user_chars
 
 
 def _log_prompt_size(
@@ -125,16 +155,18 @@ def _log_prompt_size(
     step: str,
     user_prompt: str,
     system_prompt: str,
-    limit: int,
+    total_prompt_limit: int,
+    available_user_prompt_chars: int | None = None,
 ) -> None:
     logger.info(
-        "%s prompt request_id=%s user_prompt_chars=%s system_prompt_chars=%s total_prompt_chars=%s limit=%s",
+        "%s prompt request_id=%s user_prompt_chars=%s system_prompt_chars=%s total_prompt_chars=%s available_user_prompt_chars=%s total_prompt_limit=%s",
         step,
         request_id,
         len(user_prompt),
         len(system_prompt),
         len(user_prompt) + len(system_prompt),
-        limit,
+        available_user_prompt_chars,
+        total_prompt_limit,
     )
 
 
@@ -166,6 +198,8 @@ def _call_llm_with_trace(
             step=step_name_for_gateway,
         )
         parsed = parser(raw.content)
+        llm_usage = _extract_llm_usage(raw)
+        trace['llm_usage'] = _merge_llm_usage(trace.get('llm_usage'), llm_usage)
         _add_step(
             trace,
             trace_step,
@@ -175,6 +209,7 @@ def _call_llm_with_trace(
                 "raw": raw.raw,
                 "content": raw.content,
                 "parsed": parsed,
+                "llm_usage": llm_usage,
                 **payload_extra,
             },
         )
@@ -191,6 +226,41 @@ def _call_llm_with_trace(
         )
         raise
 
+
+
+
+def _extract_llm_usage(raw: Any) -> dict[str, Any]:
+    if hasattr(raw, 'usage_dict'):
+        usage = raw.usage_dict()
+    else:
+        usage = {
+            'prompt_tokens': int(getattr(raw, 'prompt_tokens', 0) or 0),
+            'output_tokens': int(getattr(raw, 'output_tokens', 0) or 0),
+            'duration_sec': float(getattr(raw, 'duration_sec', 0.0) or 0.0),
+            'total_duration_sec': float(getattr(raw, 'total_duration_sec', 0.0) or 0.0),
+            'load_duration_sec': float(getattr(raw, 'load_duration_sec', 0.0) or 0.0),
+            'prompt_eval_duration_sec': float(getattr(raw, 'prompt_eval_duration_sec', 0.0) or 0.0),
+            'eval_duration_sec': float(getattr(raw, 'eval_duration_sec', 0.0) or 0.0),
+        }
+        usage['total_tokens'] = usage['prompt_tokens'] + usage['output_tokens']
+    return usage
+
+
+def _merge_llm_usage(existing: dict[str, Any] | None, new_usage: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(existing or {})
+    merged['calls'] = int(merged.get('calls', 0)) + 1
+    for key in (
+        'prompt_tokens',
+        'output_tokens',
+        'total_tokens',
+        'duration_sec',
+        'total_duration_sec',
+        'load_duration_sec',
+        'prompt_eval_duration_sec',
+        'eval_duration_sec',
+    ):
+        merged[key] = round(float(merged.get(key, 0.0)) + float(new_usage.get(key, 0.0)), 6)
+    return merged
 
 def _build_generated_code_context(code_artifact: CodeArtifact) -> dict[str, Any]:
     return {
@@ -229,11 +299,13 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
             step="planner",
             user_prompt=planner_prompt,
             system_prompt=prompts["system_rules"],
-            limit=config.prompt_budget.generate_chars_limit,
+            total_prompt_limit=config.prompt_budget.generate_chars_limit,
+            available_user_prompt_chars=available_user_chars,
         )
         _enforce_prompt_limit(
             "planner",
             planner_prompt,
+            prompts["system_rules"],
             config.prompt_budget.generate_chars_limit,
         )
 
@@ -273,7 +345,7 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
             available_user_chars=available_user_chars,
         )
         logger.info(
-            "coder context request_id=%s before=%s after=%s target_chars=%s full_file_chars=%s reference_chars=%s references=%s",
+            "coder context request_id=%s before=%s after=%s target_chars=%s full_file_chars=%s reference_chars=%s reference_count=%s",
             request.request_id,
             coder_context_metrics.get("coder_prompt_chars_before_trim"),
             coder_context_metrics.get("coder_prompt_chars_after_trim"),
@@ -287,12 +359,14 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
             step="coder",
             user_prompt=coder_prompt,
             system_prompt=prompts["system_rules"],
-            limit=available_user_chars,
+            total_prompt_limit=config.prompt_budget.generate_chars_limit,
+            available_user_prompt_chars=available_user_chars,
         )
         _enforce_prompt_limit(
             "coder",
             coder_prompt,
-            available_user_chars,
+            prompts["system_rules"],
+            config.prompt_budget.generate_chars_limit,
         )
 
         code_result, _, _ = _call_llm_with_trace(
@@ -374,11 +448,13 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
                 step="test_generator",
                 user_prompt=test_prompt,
                 system_prompt=prompts["system_rules"],
-                limit=config.prompt_budget.generate_test_chars_limit,
+                total_prompt_limit=config.prompt_budget.generate_test_chars_limit,
+                available_user_prompt_chars=available_user_chars,
             )
             _enforce_prompt_limit(
                 "test_generator",
                 test_prompt,
+                prompts["system_rules"],
                 config.prompt_budget.generate_test_chars_limit,
             )
 
@@ -416,6 +492,7 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
             planner_result=planner_result,
             warnings=warnings,
             trace_path=str(trace_path),
+            llm_usage=trace.get('llm_usage'),
         )
         trace["result"] = result.to_dict()
         save_trace(trace_path, trace)
@@ -429,6 +506,7 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
             request_id=request.request_id,
             status="error",
             trace_path=str(trace_path),
+            llm_usage=trace.get('llm_usage'),
             error_type=type(exc).__name__,
             message=str(exc),
         )
@@ -491,11 +569,13 @@ def generate_test(request: GenerationRequest, config_path: str) -> GenerationRes
             step="generate_test.test_generator",
             user_prompt=test_prompt,
             system_prompt=prompts["system_rules"],
-            limit=config.prompt_budget.generate_test_chars_limit,
+            total_prompt_limit=config.prompt_budget.generate_test_chars_limit,
+            available_user_prompt_chars=available_user_chars,
         )
         _enforce_prompt_limit(
             "generate_test.test_generator",
             test_prompt,
+            prompts["system_rules"],
             config.prompt_budget.generate_test_chars_limit,
         )
 
@@ -532,6 +612,7 @@ def generate_test(request: GenerationRequest, config_path: str) -> GenerationRes
             test_artifact=test_artifact,
             planner_result=None,
             trace_path=str(trace_path),
+            llm_usage=trace.get('llm_usage'),
         )
         trace["result"] = result.to_dict()
         save_trace(trace_path, trace)
@@ -545,6 +626,7 @@ def generate_test(request: GenerationRequest, config_path: str) -> GenerationRes
             request_id=request.request_id,
             status="error",
             trace_path=str(trace_path),
+            llm_usage=trace.get('llm_usage'),
             error_type=type(exc).__name__,
             message=str(exc),
         )
@@ -623,6 +705,7 @@ def repair(request: RepairRequest, config_path: str) -> GenerationResult:
             status="ok",
             code_artifact=code_artifact,
             trace_path=str(trace_path),
+            llm_usage=trace.get('llm_usage'),
         )
         trace["result"] = result.to_dict()
         save_trace(trace_path, trace)
@@ -636,6 +719,7 @@ def repair(request: RepairRequest, config_path: str) -> GenerationResult:
             request_id=request.request_id,
             status="error",
             trace_path=str(trace_path),
+            llm_usage=trace.get('llm_usage'),
             error_type=type(exc).__name__,
             message=str(exc),
         )

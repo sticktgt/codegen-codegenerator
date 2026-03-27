@@ -29,6 +29,10 @@ def _truncate_text(value: str, limit: int) -> tuple[str, bool]:
     return value[: max(0, limit - 24)] + "\n# ... truncated ...", True
 
 
+def _reference_text_chars(value: str) -> int:
+    return 0 if value == "none" else len(value)
+
+
 def _render_module_outline(module_outline: list[dict[str, Any]]) -> str:
     if not module_outline:
         return "[]"
@@ -62,12 +66,13 @@ def _render_reference_artifacts(
     content_modes: list[str] = []
 
     for item in artifacts:
-        content, truncated = _truncate_text(str(item.get("content", "")), per_item_chars)
+        raw_content = str(item.get("content", ""))
+        if per_item_chars > 0 and len(raw_content) > per_item_chars:
+            continue
+        content = raw_content
         title = str(item.get("title", ""))
         usage_mode = str(item.get("usage_mode", ""))
         block = f"Title: {title}\nUsage mode: {usage_mode}\nCode:\n{content}"
-        if truncated:
-            block += "\n# content truncated"
         blocks.append(block)
         titles.append(title)
         content_modes.append(str(item.get("content_mode", "")))
@@ -96,7 +101,7 @@ def _build_coder_prompt_metrics(
         "coder_prompt_chars_after_trim": after_trim,
         "coder_target_chars": len(target_text),
         "coder_full_file_chars": len(full_file_text),
-        "coder_reference_chars": len(reference_text),
+        "coder_reference_chars": _reference_text_chars(reference_text),
     }
 
 
@@ -241,12 +246,14 @@ def build_coder_user_prompt(
     )
 
     if len(prompt) > runtime_config.coder_prompt_target_chars and reference_text != "none":
-        compact_reference_text, ref_metrics = _render_reference_artifacts(
-            request.reference_context or {},
-            1,
-            max(300, runtime_config.coder_max_reference_chars // 2),
-        )
-        reference_text = compact_reference_text
+        reference_text = "none"
+        ref_metrics = {
+            **ref_metrics,
+            "reference_count": 0,
+            "reference_chars": 0,
+            "reference_titles": [],
+            "reference_content_modes": [],
+        }
         prompt = _render(
             module_outline_text,
             target_text,
@@ -280,6 +287,13 @@ def build_coder_user_prompt(
 
     if len(prompt) > runtime_config.coder_prompt_hard_limit and reference_text != "none":
         reference_text = "none"
+        ref_metrics = {
+            **ref_metrics,
+            "reference_count": 0,
+            "reference_chars": 0,
+            "reference_titles": [],
+            "reference_content_modes": [],
+        }
         prompt = _render(
             module_outline_text,
             target_text,
@@ -292,6 +306,13 @@ def build_coder_user_prompt(
 
     if len(prompt) > runtime_limit and reference_text != "none":
         reference_text = "none"
+        ref_metrics = {
+            **ref_metrics,
+            "reference_count": 0,
+            "reference_chars": 0,
+            "reference_titles": [],
+            "reference_content_modes": [],
+        }
         prompt = _render(
             module_outline_text,
             target_text,
