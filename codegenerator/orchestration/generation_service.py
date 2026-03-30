@@ -687,11 +687,12 @@ def repair(request: RepairRequest, config_path: str) -> GenerationResult:
             step="repair",
             user_prompt=repair_prompt,
             system_prompt=prompts["system_rules"],
-            limit=config.prompt_budget.repair_chars_limit,
+            total_prompt_limit=config.prompt_budget.repair_chars_limit,
         )
         _enforce_prompt_limit(
             "repair",
             repair_prompt,
+            prompts["system_rules"],
             config.prompt_budget.repair_chars_limit,
         )
 

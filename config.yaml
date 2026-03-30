@@ -25,7 +25,7 @@ codegenerator:
   models:
     planner_model: "qwen3:14b-q4_K_M"
     coder_model: "qwen2.5-coder:14b-instruct-q4_K_M"
-    test_generator_model: "qwen2.5-coder:7b-instruct"
+    test_generator_model: "qwen2.5-coder:14b-instruct-q4_K_M" # qwen2.5-coder:7b-instruct
     repair_model: "qwen2.5-coder:14b-instruct-q4_K_M"
 
   generation:
