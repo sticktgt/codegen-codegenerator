@@ -125,19 +125,23 @@ def _render_reference_artifacts(
 def _build_coder_prompt_metrics(
     prompt: str,
     target_text: str,
+    module_outline_text: str,
     full_file_text: str,
     reference_text: str,
     related_tests_text: str,
     before_trim: int,
     after_trim: int,
+    trim_steps: list[str] | None = None,
 ) -> dict[str, Any]:
     return {
         "coder_prompt_chars_before_trim": before_trim,
         "coder_prompt_chars_after_trim": after_trim,
         "coder_target_chars": len(target_text),
+        "coder_module_outline_chars": len(module_outline_text),
         "coder_full_file_chars": len(full_file_text),
         "coder_reference_chars": _reference_text_chars(reference_text),
         "coder_related_test_chars": 0 if related_tests_text == "none" else len(related_tests_text),
+        "coder_trim_steps": list(trim_steps or []),
     }
 
 def _render_constraints_block(constraints: list[str], limit: int = 6) -> str:
@@ -215,6 +219,7 @@ def build_coder_user_prompt(
     available_user_chars: int | None = None,
 ) -> tuple[str, dict[str, Any]]:
     pc = request.project_context or {}
+    request_mode = str(getattr(request, 'mode', 'generate') or 'generate')
     module_outline_text = _render_module_outline(pc.get("module_outline", []))
     target_text = _render_target_symbol(
         pc.get("target_symbol") or pc.get("target_function") or {}
@@ -270,6 +275,32 @@ def build_coder_user_prompt(
             prompt += "\n\nRelated tests:\n" + related_tests_value
         return prompt
 
+    def _drop_reference() -> None:
+        nonlocal reference_text, ref_metrics
+        reference_text = "none"
+        ref_metrics = {
+            **ref_metrics,
+            "reference_count": 0,
+            "reference_chars": 0,
+            "reference_titles": [],
+            "reference_content_modes": [],
+        }
+
+    def _drop_related_tests() -> None:
+        nonlocal related_tests_text, related_test_metrics
+        related_tests_text = "none"
+        related_test_metrics = {
+            **related_test_metrics,
+            "related_tests_count": 0,
+            "related_test_chars": 0,
+            "related_test_qualnames": [],
+        }
+
+    trim_steps: list[str] = []
+
+    def _record(step: str) -> None:
+        trim_steps.append(step)
+
     initial_prompt = _render(
         module_outline_text,
         target_text,
@@ -282,6 +313,7 @@ def build_coder_user_prompt(
 
     if len(initial_prompt) > runtime_config.coder_prompt_target_chars and full_file_text:
         full_file_text = ""
+        _record("removed full_file_source on soft target limit")
     prompt = _render(
         module_outline_text,
         target_text,
@@ -291,14 +323,11 @@ def build_coder_user_prompt(
         compact_request_text,
     )
 
-    if len(prompt) > runtime_config.coder_prompt_target_chars and related_tests_text != "none":
-        related_tests_text = "none"
-        related_test_metrics = {
-            **related_test_metrics,
-            "related_tests_count": 0,
-            "related_test_chars": 0,
-            "related_test_qualnames": [],
-        }
+    # Для generate стараемся держать reference дольше, а related tests считаем опциональными.
+    # Для других режимов (если будут использовать этот builder) порядок остается консервативным.
+    if len(prompt) > runtime_config.coder_prompt_target_chars and request_mode == "generate" and related_tests_text != "none":
+        _drop_related_tests()
+        _record("removed related_tests on soft target limit for generate")
         prompt = _render(
             module_outline_text,
             target_text,
@@ -308,15 +337,9 @@ def build_coder_user_prompt(
             compact_request_text,
         )
 
-    if len(prompt) > runtime_config.coder_prompt_target_chars and reference_text != "none":
-        reference_text = "none"
-        ref_metrics = {
-            **ref_metrics,
-            "reference_count": 0,
-            "reference_chars": 0,
-            "reference_titles": [],
-            "reference_content_modes": [],
-        }
+    if len(prompt) > runtime_config.coder_prompt_target_chars and request_mode != "generate" and reference_text != "none":
+        _drop_reference()
+        _record("removed reference on soft target limit for non-generate")
         prompt = _render(
             module_outline_text,
             target_text,
@@ -325,9 +348,26 @@ def build_coder_user_prompt(
             related_tests_text,
             compact_request_text,
         )
+
+    if len(prompt) > runtime_config.coder_prompt_target_chars and request_mode != "generate" and related_tests_text != "none":
+        _drop_related_tests()
+        _record("removed related_tests on soft target limit for non-generate")
+        prompt = _render(
+            module_outline_text,
+            target_text,
+            full_file_text,
+            reference_text,
+            related_tests_text,
+            compact_request_text,
+        )
+
+    # Для generate не удаляем reference на soft target этапе.
+    # Сначала пытаемся ужать module outline и только на более поздних fallback-этапах
+    # допускаем удаление reference, если prompt все еще не помещается.
 
     if len(prompt) > runtime_config.coder_prompt_target_chars:
         module_outline_text, _ = _truncate_text(module_outline_text, 400)
+        _record("truncated module_outline to 400 on soft target limit")
         prompt = _render(
             module_outline_text,
             target_text,
@@ -342,6 +382,19 @@ def build_coder_user_prompt(
             target_text,
             max(220, runtime_config.coder_prompt_hard_limit // 4),
         )
+        _record("truncated target on hard limit")
+        prompt = _render(
+            module_outline_text,
+            target_text,
+            full_file_text,
+            reference_text,
+            related_tests_text,
+            compact_request_text,
+        )
+
+    if len(prompt) > runtime_config.coder_prompt_hard_limit and request_mode == "generate" and related_tests_text != "none":
+        _drop_related_tests()
+        _record("removed related_tests on hard limit for generate")
         prompt = _render(
             module_outline_text,
             target_text,
@@ -352,14 +405,8 @@ def build_coder_user_prompt(
         )
 
     if len(prompt) > runtime_config.coder_prompt_hard_limit and reference_text != "none":
-        reference_text = "none"
-        ref_metrics = {
-            **ref_metrics,
-            "reference_count": 0,
-            "reference_chars": 0,
-            "reference_titles": [],
-            "reference_content_modes": [],
-        }
+        _drop_reference()
+        _record("removed reference on hard limit")
         prompt = _render(
             module_outline_text,
             target_text,
@@ -371,15 +418,24 @@ def build_coder_user_prompt(
 
     runtime_limit = available_user_chars or runtime_config.coder_prompt_hard_limit
 
-    if len(prompt) > runtime_limit and reference_text != "none":
-        reference_text = "none"
-        ref_metrics = {
-            **ref_metrics,
-            "reference_count": 0,
-            "reference_chars": 0,
-            "reference_titles": [],
-            "reference_content_modes": [],
-        }
+    if len(prompt) > runtime_limit and request_mode == "generate" and related_tests_text != "none":
+        _drop_related_tests()
+        _record("removed related_tests on runtime limit for generate")
+        prompt = _render(
+            module_outline_text,
+            target_text,
+            full_file_text,
+            reference_text,
+            related_tests_text,
+            compact_request_text,
+        )
+
+    # Для generate не удаляем reference на раннем runtime_limit этапе.
+    # Сначала даем шанс более мягкому ужатию request/target/module_outline.
+    # Reference остается последним fallback на позднем runtime этапе.
+    if len(prompt) > runtime_limit and request_mode != "generate" and reference_text != "none":
+        _drop_reference()
+        _record("removed reference on runtime limit for non-generate")
         prompt = _render(
             module_outline_text,
             target_text,
@@ -394,6 +450,7 @@ def build_coder_user_prompt(
             compact_request_text,
             max(220, runtime_limit // 5),
         )
+        _record("truncated request on runtime limit")
         prompt = _render(
             module_outline_text,
             target_text,
@@ -408,6 +465,7 @@ def build_coder_user_prompt(
             target_text,
             max(220, runtime_limit // 4),
         )
+        _record("truncated target on runtime limit")
         prompt = _render(
             module_outline_text,
             target_text,
@@ -419,6 +477,7 @@ def build_coder_user_prompt(
 
     if len(prompt) > runtime_limit and module_outline_text != "[]":
         module_outline_text, _ = _truncate_text(module_outline_text, 120)
+        _record("truncated module_outline to 120 on runtime limit")
         prompt = _render(
             module_outline_text,
             target_text,
@@ -433,6 +492,19 @@ def build_coder_user_prompt(
             related_tests_text,
             max(180, runtime_limit // 10),
         )
+        _record("truncated related_tests on runtime limit")
+        prompt = _render(
+            module_outline_text,
+            target_text,
+            full_file_text,
+            reference_text,
+            related_tests_text,
+            compact_request_text,
+        )
+
+    if len(prompt) > runtime_limit and reference_text != "none":
+        _drop_reference()
+        _record("removed reference on late runtime limit")
         prompt = _render(
             module_outline_text,
             target_text,
@@ -444,6 +516,7 @@ def build_coder_user_prompt(
 
     if len(prompt) > runtime_limit:
         compact_request_text, _ = _truncate_text(compact_request_text, 160)
+        _record("truncated request to 160 on late runtime limit")
         prompt = _render(
             module_outline_text,
             target_text,
@@ -455,6 +528,7 @@ def build_coder_user_prompt(
 
     if len(prompt) > runtime_limit:
         target_text, _ = _truncate_text(target_text, 160)
+        _record("truncated target to 160 on late runtime limit")
         prompt = _render(
             module_outline_text,
             target_text,
@@ -467,11 +541,13 @@ def build_coder_user_prompt(
     metrics = _build_coder_prompt_metrics(
         prompt,
         target_text,
+        module_outline_text,
         full_file_text,
         reference_text,
         related_tests_text,
         before_trim,
         len(prompt),
+        trim_steps,
     )
     metrics.update(ref_metrics)
     metrics.update(related_test_metrics)

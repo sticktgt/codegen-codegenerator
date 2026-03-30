@@ -350,7 +350,7 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
             available_user_chars=available_user_chars,
         )
         logger.info(
-            "coder context request_id=%s before=%s after=%s target_chars=%s full_file_chars=%s related_test_chars=%s related_tests_count=%s reference_chars=%s reference_count=%s",
+            "coder context request_id=%s before=%s after=%s target_chars=%s full_file_chars=%s related_test_chars=%s related_tests_count=%s reference_chars=%s reference_count=%s trim_steps=%s",
             request.request_id,
             coder_context_metrics.get("coder_prompt_chars_before_trim"),
             coder_context_metrics.get("coder_prompt_chars_after_trim"),
@@ -360,6 +360,19 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
             coder_context_metrics.get("related_tests_count"),
             coder_context_metrics.get("coder_reference_chars"),
             coder_context_metrics.get("reference_count"),
+            coder_context_metrics.get("coder_trim_steps"),
+        )
+        logger.info(
+            "coder prompt composition request_id=%s mode=%s target_chars=%s module_outline_chars=%s full_file_chars=%s related_tests_count=%s related_test_chars=%s reference_count=%s reference_chars=%s",
+            request.request_id,
+            getattr(request, 'mode', 'generate'),
+            coder_context_metrics.get("coder_target_chars"),
+            coder_context_metrics.get("coder_module_outline_chars"),
+            coder_context_metrics.get("coder_full_file_chars"),
+            coder_context_metrics.get("related_tests_count"),
+            coder_context_metrics.get("coder_related_test_chars"),
+            coder_context_metrics.get("reference_count"),
+            coder_context_metrics.get("coder_reference_chars"),
         )
         _log_prompt_size(
             request_id=request.request_id,
@@ -571,6 +584,12 @@ def generate_test(request: GenerationRequest, config_path: str) -> GenerationRes
             test_context_metrics.get("test_example_chars"),
             test_context_metrics.get("test_request_chars"),
             test_context_metrics.get("test_target_source_origin"),
+        )
+        logger.info(
+            "generate_test prompt composition request_id=%s related_tests_count=%s related_test_chars=%s",
+            request.request_id,
+            test_context_metrics.get("test_related_tests_count"),
+            test_context_metrics.get("test_related_test_chars"),
         )
 
         _log_prompt_size(

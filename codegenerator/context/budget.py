@@ -205,8 +205,9 @@ def apply_budget_strategy(
         _trim_related_tests(request, keep=1, source_limit=350, trim_log=trim_log)
 
     else:  # generate
+        # Для генерации кода reference обычно полезнее, а related_tests - опциональны.
         _trim_module_outline(request, keep=4, trim_log=trim_log)
-        _trim_related_tests(request, keep=1, source_limit=450, trim_log=trim_log)
+        _trim_related_tests(request, keep=1, source_limit=320, trim_log=trim_log)
 
     # Общий fallback-режим, если дальше все еще будет тесно
     _trim_target_source(request, source_limit=1400 if mode != "repair" else 900, trim_log=trim_log)

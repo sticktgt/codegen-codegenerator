@@ -14,7 +14,8 @@
 4. разбирает raw-ответ модели;
 5. нормализует операции и артефакты;
 6. возвращает единый `GenerationResult`;
-7. сохраняет trace, raw output и метаданные вызова.
+7. сохраняет trace, raw output и метаданные вызова;
+8. применяет внутреннюю стратегию budget и сокращения prompt.
 
 ## Основные режимы работы
 
@@ -25,13 +26,14 @@
 Последовательность:
 
 1. загрузка `GenerationRequest`;
-2. построение planner prompt;
-3. вызов planner model;
-4. построение coder prompt;
-5. вызов coder model;
-6. разбор ответа в `code_artifact`;
-7. нормализация операции;
-8. возврат `GenerationResult`.
+2. применение budget strategy к request;
+3. построение planner prompt;
+4. вызов planner model;
+5. построение coder prompt;
+6. вызов coder model;
+7. разбор ответа в `code_artifact`;
+8. нормализация операции;
+9. возврат `GenerationResult`.
 
 Результат режима:
 
@@ -45,8 +47,8 @@
 Последовательность:
 
 1. загрузка `GenerationRequest`;
-2. построение planner prompt;
-3. вызов planner model;
+2. применение budget strategy к request;
+3. пропуск planner;
 4. построение prompt для test generation;
 5. вызов `test_generator_model`;
 6. разбор ответа в `test_artifact`;
@@ -186,7 +188,7 @@ python -m codegenerator repair --request-file <request_file> --config <config_pa
 - `reference_artifacts`.
 
 #### `generated_code_artifact`
-Дополнительное поле для связанных сценариев генерации.
+Дополнительное поле для связанных сценариев генерации. В `generate-test` содержит уже сгенерированный production-код, который используется как основной target source для генерации теста.
 
 #### `options`
 Опции генерации.
@@ -248,6 +250,7 @@ python -m codegenerator repair --request-file <request_file> --config <config_pa
   "planner_result": {},
   "warnings": [],
   "trace_path": "runs/...json",
+  "llm_usage": {},
   "error_type": null,
   "message": null
 }
@@ -262,6 +265,7 @@ python -m codegenerator repair --request-file <request_file> --config <config_pa
 - `planner_result` — промежуточный результат planner;
 - `warnings` — предупреждения;
 - `trace_path` — путь к trace-файлу;
+- `llm_usage` — агрегированные метрики вызовов моделей;
 - `error_type` — тип ошибки;
 - `message` — текст сообщения.
 
@@ -313,6 +317,8 @@ python -m codegenerator repair --request-file <request_file> --config <config_pa
 - reference artifacts;
 - default constraints из конфигурации.
 
+При ужатии prompt для `generate` `codegenerator` старается держать reference дольше, чем `related_tests`. Сначала убираются менее обязательные части контекста, затем выполняются дополнительные сокращения текста prompt.
+
 ### Контекст для `generate-test`
 
 В prompt для генерации теста могут входить:
@@ -320,12 +326,12 @@ python -m codegenerator repair --request-file <request_file> --config <config_pa
 - `change_request`;
 - `constraints`;
 - `target`;
-- `target_symbol.source`;
-- planner result;
+- исходный код target, взятый из `generated_code_artifact`;
 - `module_outline`;
 - `related_tests`;
-- reference artifacts;
 - example test block из prompt templates.
+
+В текущей версии `generate-test` не использует planner и по умолчанию не использует reference artifacts.
 
 ### Контекст для `repair`
 
@@ -338,6 +344,31 @@ python -m codegenerator repair --request-file <request_file> --config <config_pa
 - target source;
 - project context в компактной форме;
 - compact reference context.
+
+## Prompt budget и сокращение контекста
+
+Основное сокращение prompt выполняется внутри `codegenerator`.
+
+Используются два уровня:
+
+1. budget strategy для request;
+2. позднее сокращение уже собранного prompt.
+
+В логах и trace используются, например, такие метрики:
+
+- `request_payload_chars_before`;
+- `request_payload_chars_after`;
+- `available_user_prompt_chars`;
+- `coder_prompt_chars_before_trim`;
+- `coder_prompt_chars_after_trim`;
+- `coder_trim_steps`;
+- `prompt_tokens`;
+- `output_tokens`;
+- `total_tokens`;
+- `duration_sec`;
+- `load_duration_sec`;
+- `prompt_eval_duration_sec`;
+- `eval_duration_sec`.
 
 ## Конфигурация
 
@@ -380,7 +411,7 @@ Runtime-параметры генерации:
 - `max_repair_attempts`;
 - `test_generation_mode`;
 - `test_generator_max_example_tests`;
-- лимиты budget для prompt trimming.
+- параметры budget и сокращения prompt.
 
 ### `codegenerator.defaults`
 Default constraints, которые добавляются к request.
@@ -438,5 +469,5 @@ Default constraints, которые добавляются к request.
 
 - расширение поддержки языков;
 - перенос внешнего вызова с CLI на API с сохранением JSON-контракта;
-- более детальный учет метрик вызовов моделей;
-- развитие prompt budget и trace-метрик.
+- развитие budget strategy и prompt trimming;
+- развитие trace, логов и метрик вызовов моделей.
