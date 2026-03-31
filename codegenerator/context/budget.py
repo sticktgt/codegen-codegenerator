@@ -165,6 +165,7 @@ def apply_budget_strategy(
     mode: str,
     request_chars_limit: int,
     logger,
+    config,
 ) -> tuple[dict[str, Any], list[str]]:
     trim_log: list[str] = []
 
@@ -190,27 +191,43 @@ def apply_budget_strategy(
 
     metrics_before = _context_metrics_from_request(request)
 
+    budget = config.budget_strategy
+
     if mode == "generate_test":
-        # Для генерации тестов полезнее существующие project tests, чем общие reference snippets.
-        _drop_all_reference_artifacts(request, trim_log)
-        _trim_module_outline(request, keep=2, trim_log=trim_log)
-        _trim_related_tests(request, keep=1, source_limit=500, trim_log=trim_log)
+        if budget.generate_test_drop_reference:
+            _drop_all_reference_artifacts(request, trim_log)
+        _trim_module_outline(request, keep=budget.generate_test_module_outline_keep, trim_log=trim_log)
+        _trim_related_tests(
+            request,
+            keep=budget.generate_test_related_tests_keep,
+            source_limit=budget.generate_test_related_test_source_limit,
+            trim_log=trim_log,
+        )
+        _trim_target_source(request, source_limit=budget.generate_test_target_source_limit, trim_log=trim_log)
 
     elif mode == "repair":
-        # Repair должен быть максимально коротким
-        _drop_all_reference_artifacts(request, trim_log)
-        _trim_module_outline(request, keep=2, trim_log=trim_log)
-        _trim_verification_summary(request, message_limit=300, trim_log=trim_log)
-        _trim_previous_artifact(request, code_limit=1200, trim_log=trim_log)
-        _trim_related_tests(request, keep=1, source_limit=350, trim_log=trim_log)
+        if budget.repair_drop_reference:
+            _drop_all_reference_artifacts(request, trim_log)
+        _trim_module_outline(request, keep=budget.repair_module_outline_keep, trim_log=trim_log)
+        _trim_verification_summary(request, message_limit=budget.repair_verification_message_limit, trim_log=trim_log)
+        _trim_previous_artifact(request, code_limit=budget.repair_previous_artifact_code_limit, trim_log=trim_log)
+        _trim_related_tests(
+            request,
+            keep=budget.repair_related_tests_keep,
+            source_limit=budget.repair_related_test_source_limit,
+            trim_log=trim_log,
+        )
+        _trim_target_source(request, source_limit=budget.repair_target_source_limit, trim_log=trim_log)
 
     else:  # generate
-        # Для генерации кода reference обычно полезнее, а related_tests - опциональны.
-        _trim_module_outline(request, keep=4, trim_log=trim_log)
-        _trim_related_tests(request, keep=1, source_limit=320, trim_log=trim_log)
-
-    # Общий fallback-режим, если дальше все еще будет тесно
-    _trim_target_source(request, source_limit=1400 if mode != "repair" else 900, trim_log=trim_log)
+        _trim_module_outline(request, keep=budget.generate_module_outline_keep, trim_log=trim_log)
+        _trim_related_tests(
+            request,
+            keep=budget.generate_related_tests_keep,
+            source_limit=budget.generate_related_test_source_limit,
+            trim_log=trim_log,
+        )
+        _trim_target_source(request, source_limit=budget.generate_target_source_limit, trim_log=trim_log)
 
     metrics_after = _context_metrics_from_request(request)
     request["context_metrics"] = {

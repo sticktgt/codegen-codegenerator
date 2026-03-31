@@ -51,10 +51,10 @@ def _add_step(trace: dict[str, Any], step: str, payload: dict[str, Any]) -> None
     trace["steps"].append({"step": step, "payload": payload})
 
 
-def _available_user_chars(limit: int, system_prompt: str) -> int:
+def _available_user_chars(limit: int, system_prompt: str, *, min_user_prompt_chars: int, user_prompt_reserve_chars: int) -> int:
     reserve = len(system_prompt or "")
     available = limit - reserve
-    return max(400, available - 100)
+    return max(min_user_prompt_chars, available - user_prompt_reserve_chars)
 
 
 def _enforce_prompt_limit(step: str, user_prompt: str, system_prompt: str, total_limit: int) -> bool:
@@ -116,10 +116,11 @@ def _prepare_request_with_budget(
     total_limit: int,
     system_prompt: str,
     trace: dict[str, Any],
+    config,
 ):
     request_dict = asdict(request)
     request_chars_before = len(json.dumps(request_dict, ensure_ascii=False))
-    available_user_chars = _available_user_chars(total_limit, system_prompt)
+    available_user_chars = _available_user_chars(total_limit, system_prompt, min_user_prompt_chars=config.prompt_budget.min_user_prompt_chars, user_prompt_reserve_chars=config.prompt_budget.user_prompt_reserve_chars)
     context_metrics_before = dict(request_dict.get("context_metrics", {}) or {})
 
     logger.info(
@@ -136,6 +137,7 @@ def _prepare_request_with_budget(
         request=request_dict,
         mode=mode,
         request_chars_limit=available_user_chars,
+        config=config,
         logger=logger,
     )
     context_metrics_after = dict(request_dict.get("context_metrics", {}) or {})
@@ -292,6 +294,7 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
             total_limit=config.prompt_budget.generate_chars_limit,
             system_prompt=prompts["system_rules"],
             trace=trace,
+            config=config,
         )
 
         planner_prompt = build_planner_user_prompt(
@@ -430,6 +433,7 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
                 total_limit=config.prompt_budget.generate_test_chars_limit,
                 system_prompt=prompts["system_rules"],
                 trace=trace,
+                config=config,
             )
 
             expected_test_file = build_generated_test_filename(test_request)
@@ -549,6 +553,7 @@ def generate_test(request: GenerationRequest, config_path: str) -> GenerationRes
             total_limit=config.prompt_budget.generate_test_chars_limit,
             system_prompt=prompts["system_rules"],
             trace=trace,
+            config=config,
         )
 
         target_source_origin = (
@@ -675,6 +680,7 @@ def repair(request: RepairRequest, config_path: str) -> GenerationResult:
             total_limit=config.prompt_budget.repair_chars_limit,
             system_prompt=prompts["system_rules"],
             trace=trace,
+            config=config,
         )
 
         repair_prompt = build_repair_user_prompt(

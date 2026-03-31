@@ -25,7 +25,7 @@ codegenerator:
   models:
     planner_model: "qwen3:14b-q4_K_M"
     coder_model: "qwen2.5-coder:14b-instruct-q4_K_M"
-    test_generator_model: "qwen2.5-coder:14b-instruct-q4_K_M" # qwen2.5-coder:7b-instruct
+    test_generator_model: "qwen2.5-coder:7b-instruct" # qwen2.5-coder:7b-instruct
     repair_model: "qwen2.5-coder:14b-instruct-q4_K_M"
 
   generation:
@@ -57,4 +57,6 @@ codegenerator:
   prompt_budget:
     generate_chars_limit: 5600
     generate_test_chars_limit: 5400
-    repair_chars_limit: 5600    
+    repair_chars_limit: 5600
+    min_user_prompt_chars: 400
+    user_prompt_reserve_chars: 100

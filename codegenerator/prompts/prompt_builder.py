@@ -1,6 +1,7 @@
 # codegenerator/prompts/prompt_builder.py
 from __future__ import annotations
 
+import ast
 import json
 from typing import Any
 
@@ -54,7 +55,48 @@ def _render_target_symbol(target_symbol: dict[str, Any]) -> str:
     return _pretty({k: v for k, v in target_symbol.items() if k != "source"})
 
 
+def _extract_import_block_from_source(source_text: str) -> str:
+    if not source_text:
+        return ""
+    lines: list[str] = []
+    for raw_line in source_text.splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if stripped.startswith('import ') or stripped.startswith('from '):
+            lines.append(line)
+    return "\n".join(lines)
 
+
+def _infer_project_symbol_names_from_source(source_text: str) -> list[str]:
+    if not source_text:
+        return []
+    try:
+        tree = ast.parse(source_text)
+    except SyntaxError:
+        return []
+
+    names: set[str] = set()
+
+    class Visitor(ast.NodeVisitor):
+        def visit_Name(self, node: ast.Name) -> None:
+            if node.id and node.id[:1].isupper():
+                names.add(node.id)
+            self.generic_visit(node)
+
+        def visit_arg(self, node: ast.arg) -> None:
+            annotation = getattr(node, 'annotation', None)
+            if isinstance(annotation, ast.Name) and annotation.id[:1].isupper():
+                names.add(annotation.id)
+            self.generic_visit(node)
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            returns = getattr(node, 'returns', None)
+            if isinstance(returns, ast.Name) and returns.id[:1].isupper():
+                names.add(returns.id)
+            self.generic_visit(node)
+
+    Visitor().visit(tree)
+    return sorted(names)
 
 def _render_related_tests(
     project_context: dict[str, Any],
@@ -241,8 +283,8 @@ def build_coder_user_prompt(
     )
     related_tests_text, related_test_metrics = _render_related_tests(
         pc,
-        max_items=1,
-        per_item_chars=450,
+        max_items=runtime_config.prompt_assembly.coder_related_tests_max_items,
+        per_item_chars=runtime_config.prompt_assembly.coder_related_tests_per_item_chars,
     )
 
     compact_request_text = _compact_change_request_for_codegen(
@@ -366,8 +408,8 @@ def build_coder_user_prompt(
     # допускаем удаление reference, если prompt все еще не помещается.
 
     if len(prompt) > runtime_config.coder_prompt_target_chars:
-        module_outline_text, _ = _truncate_text(module_outline_text, 400)
-        _record("truncated module_outline to 400 on soft target limit")
+        module_outline_text, _ = _truncate_text(module_outline_text, runtime_config.prompt_assembly.coder_soft_module_outline_chars)
+        _record(f"truncated module_outline to {runtime_config.prompt_assembly.coder_soft_module_outline_chars} on soft target limit")
         prompt = _render(
             module_outline_text,
             target_text,
@@ -418,17 +460,8 @@ def build_coder_user_prompt(
 
     runtime_limit = available_user_chars or runtime_config.coder_prompt_hard_limit
 
-    if len(prompt) > runtime_limit and request_mode == "generate" and related_tests_text != "none":
-        _drop_related_tests()
-        _record("removed related_tests on runtime limit for generate")
-        prompt = _render(
-            module_outline_text,
-            target_text,
-            full_file_text,
-            reference_text,
-            related_tests_text,
-            compact_request_text,
-        )
+    # Для generate не удаляем related_tests на раннем runtime_limit этапе.
+    # Сначала пробуем ужать request/target/module outline, а related tests сокращаем позже.
 
     # Для generate не удаляем reference на раннем runtime_limit этапе.
     # Сначала даем шанс более мягкому ужатию request/target/module_outline.
@@ -448,7 +481,7 @@ def build_coder_user_prompt(
     if len(prompt) > runtime_limit:
         compact_request_text, _ = _truncate_text(
             compact_request_text,
-            max(220, runtime_limit // 5),
+            max(runtime_config.prompt_assembly.coder_runtime_request_chars, runtime_limit // 5),
         )
         _record("truncated request on runtime limit")
         prompt = _render(
@@ -463,7 +496,7 @@ def build_coder_user_prompt(
     if len(prompt) > runtime_limit:
         target_text, _ = _truncate_text(
             target_text,
-            max(220, runtime_limit // 4),
+            max(runtime_config.prompt_assembly.coder_runtime_target_chars, runtime_limit // 4),
         )
         _record("truncated target on runtime limit")
         prompt = _render(
@@ -476,8 +509,8 @@ def build_coder_user_prompt(
         )
 
     if len(prompt) > runtime_limit and module_outline_text != "[]":
-        module_outline_text, _ = _truncate_text(module_outline_text, 120)
-        _record("truncated module_outline to 120 on runtime limit")
+        module_outline_text, _ = _truncate_text(module_outline_text, runtime_config.prompt_assembly.coder_runtime_module_outline_chars)
+        _record(f"truncated module_outline to {runtime_config.prompt_assembly.coder_runtime_module_outline_chars} on runtime limit")
         prompt = _render(
             module_outline_text,
             target_text,
@@ -490,7 +523,7 @@ def build_coder_user_prompt(
     if len(prompt) > runtime_limit and related_tests_text != "none":
         related_tests_text, _ = _truncate_text(
             related_tests_text,
-            max(180, runtime_limit // 10),
+            max(runtime_config.prompt_assembly.coder_runtime_related_tests_min_chars, runtime_limit // 10),
         )
         _record("truncated related_tests on runtime limit")
         prompt = _render(
@@ -515,8 +548,8 @@ def build_coder_user_prompt(
         )
 
     if len(prompt) > runtime_limit:
-        compact_request_text, _ = _truncate_text(compact_request_text, 160)
-        _record("truncated request to 160 on late runtime limit")
+        compact_request_text, _ = _truncate_text(compact_request_text, runtime_config.prompt_assembly.coder_runtime_request_chars)
+        _record(f"truncated request to {runtime_config.prompt_assembly.coder_runtime_request_chars} on late runtime limit")
         prompt = _render(
             module_outline_text,
             target_text,
@@ -527,8 +560,20 @@ def build_coder_user_prompt(
         )
 
     if len(prompt) > runtime_limit:
-        target_text, _ = _truncate_text(target_text, 160)
-        _record("truncated target to 160 on late runtime limit")
+        target_text, _ = _truncate_text(target_text, runtime_config.prompt_assembly.coder_runtime_target_chars)
+        _record(f"truncated target to {runtime_config.prompt_assembly.coder_runtime_target_chars} on late runtime limit")
+        prompt = _render(
+            module_outline_text,
+            target_text,
+            full_file_text,
+            reference_text,
+            related_tests_text,
+            compact_request_text,
+        )
+
+    if len(prompt) > runtime_limit and related_tests_text != "none":
+        _drop_related_tests()
+        _record("removed related_tests on final runtime fallback")
         prompt = _render(
             module_outline_text,
             target_text,
@@ -568,16 +613,16 @@ def build_repair_user_prompt(
     constraints = [str(item) for item in (change_request.get("constraints") or []) if item]
 
     target_source = str(target_symbol.get("source", "") or "")
-    target_source, _ = _truncate_text(target_source, 900)
+    target_source, _ = _truncate_text(target_source, runtime_config.prompt_assembly.repair_target_source_chars)
     module_outline_text = _render_module_outline(module_outline)
 
     previous_code = str(request.previous_artifact.get("code", "") or "")
-    previous_code, _ = _truncate_text(previous_code, 1200)
+    previous_code, _ = _truncate_text(previous_code, runtime_config.prompt_assembly.repair_previous_code_chars)
 
     if runtime_config and runtime_config.coder_max_full_file_chars <= 0:
         full_file_source = ""
     elif full_file_source:
-        full_file_source, _ = _truncate_text(full_file_source, 700)
+        full_file_source, _ = _truncate_text(full_file_source, runtime_config.prompt_assembly.repair_full_file_source_chars)
 
     reference_context = request.reference_context or {}
     compact_reference = {
@@ -686,11 +731,15 @@ def build_test_generator_user_prompt(
         target_source = str(target_symbol.get("source", "") or "").strip()
         target_source_origin = "project_context.target_symbol"
 
-    example_text, _ = _truncate_text(example_test_source or "", 700)
+    full_file_source = str(pc.get("full_file_source", "") or "").strip()
+    import_block = _extract_import_block_from_source(full_file_source)
+    inferred_project_symbols = _infer_project_symbol_names_from_source(target_source)
+
+    example_text, _ = _truncate_text(example_test_source or "", runtime_config.prompt_assembly.test_example_chars)
     related_tests_text, related_test_metrics = _render_related_tests(
         pc,
         max_items=1,
-        per_item_chars=500,
+        per_item_chars=runtime_config.budget_strategy.generate_test_related_test_source_limit,
     )
 
     def _render(
@@ -711,6 +760,12 @@ def build_test_generator_user_prompt(
             if related_tests_value and related_tests_value != "none"
             else ""
         )
+        import_block_text = f"\n\nTarget file imports:\n{import_block}" if import_block else ""
+        inferred_symbols_block = (
+            "\n\nProject symbols referenced in target code (import them if used in the test):\n" + "\n".join(f"- {name}" for name in inferred_project_symbols)
+            if inferred_project_symbols
+            else ""
+        )
         prompt = template_text.format(
             operation=request.target.get("operation", "replace_symbol"),
             target_file=request.target.get("file_path", ""),
@@ -726,7 +781,7 @@ def build_test_generator_user_prompt(
             example_test_source=example_value,
             example_test_block=example_block,
         )
-        return prompt + related_tests_block
+        return prompt + import_block_text + inferred_symbols_block + related_tests_block
 
     prompt = _render(
         request_value=compact_request_text,
@@ -737,7 +792,7 @@ def build_test_generator_user_prompt(
     before_trim = len(prompt)
 
     if len(prompt) > available_user_chars:
-        example_text, _ = _truncate_text(example_text, 400)
+        example_text, _ = _truncate_text(example_text, runtime_config.prompt_assembly.test_example_trim_chars)
         prompt = _render(
             request_value=compact_request_text,
             target_function_value=target_source,
@@ -761,7 +816,7 @@ def build_test_generator_user_prompt(
         )
 
     if len(prompt) > available_user_chars:
-        target_source, _ = _truncate_text(target_source, 900)
+        target_source, _ = _truncate_text(target_source, runtime_config.prompt_assembly.repair_target_source_chars)
         prompt = _render(
             request_value=compact_request_text,
             target_function_value=target_source,
@@ -770,9 +825,9 @@ def build_test_generator_user_prompt(
         )
 
     if len(prompt) > available_user_chars:
-        target_source, _ = _truncate_text(target_source, 650)
-        example_text, _ = _truncate_text(example_text, 220)
-        compact_request_text, _ = _truncate_text(compact_request_text, 320)
+        target_source, _ = _truncate_text(target_source, runtime_config.prompt_assembly.test_target_trim_second_chars)
+        example_text, _ = _truncate_text(example_text, runtime_config.prompt_assembly.test_example_trim_second_chars)
+        compact_request_text, _ = _truncate_text(compact_request_text, runtime_config.prompt_assembly.test_request_trim_first_chars)
         prompt = _render(
             request_value=compact_request_text,
             target_function_value=target_source,
@@ -783,7 +838,7 @@ def build_test_generator_user_prompt(
     if len(prompt) > available_user_chars and related_tests_text != "none":
         related_tests_text, _ = _truncate_text(
             related_tests_text,
-            max(180, available_user_chars // 10),
+            max(runtime_config.prompt_assembly.test_related_tests_trim_min_chars, available_user_chars // 10),
         )
         prompt = _render(
             request_value=compact_request_text,
@@ -793,7 +848,7 @@ def build_test_generator_user_prompt(
         )
 
     if len(prompt) > available_user_chars:
-        compact_request_text, _ = _truncate_text(compact_request_text, 160)
+        compact_request_text, _ = _truncate_text(compact_request_text, runtime_config.prompt_assembly.coder_runtime_request_chars)
         target_source, _ = _truncate_text(target_source, 420)
         example_text, _ = _truncate_text(example_text, 120)
         prompt = _render(
@@ -813,5 +868,7 @@ def build_test_generator_user_prompt(
         "test_related_tests_count": related_test_metrics.get("related_tests_count", 0),
         "test_related_test_chars": related_test_metrics.get("related_test_chars", 0),
         "test_related_test_qualnames": related_test_metrics.get("related_test_qualnames", []),
+        "test_import_context_chars": len(import_block),
+        "test_inferred_project_symbols": inferred_project_symbols,
     }
     return prompt, metrics

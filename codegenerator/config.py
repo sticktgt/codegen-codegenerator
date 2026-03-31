@@ -56,6 +56,53 @@ class PromptBudgetSettings:
     generate_chars_limit: int
     generate_test_chars_limit: int
     repair_chars_limit: int
+    min_user_prompt_chars: int
+    user_prompt_reserve_chars: int
+
+
+@dataclass(slots=True)
+class BudgetStrategySettings:
+    generate_module_outline_keep: int
+    generate_related_tests_keep: int
+    generate_related_test_source_limit: int
+    generate_target_source_limit: int
+    generate_test_drop_reference: bool
+    generate_test_module_outline_keep: int
+    generate_test_related_tests_keep: int
+    generate_test_related_test_source_limit: int
+    generate_test_target_source_limit: int
+    repair_drop_reference: bool
+    repair_module_outline_keep: int
+    repair_verification_message_limit: int
+    repair_previous_artifact_code_limit: int
+    repair_related_tests_keep: int
+    repair_related_test_source_limit: int
+    repair_target_source_limit: int
+
+
+@dataclass(slots=True)
+class PromptAssemblySettings:
+    coder_related_tests_max_items: int
+    coder_related_tests_per_item_chars: int
+    coder_soft_module_outline_chars: int
+    coder_runtime_request_chars: int
+    coder_runtime_target_chars: int
+    coder_runtime_module_outline_chars: int
+    coder_runtime_related_tests_min_chars: int
+    repair_target_source_chars: int
+    repair_previous_code_chars: int
+    repair_full_file_source_chars: int
+    test_example_chars: int
+    test_example_trim_chars: int
+    test_target_trim_first_chars: int
+    test_target_trim_second_chars: int
+    test_request_trim_first_chars: int
+    test_request_trim_second_chars: int
+    test_related_tests_trim_min_chars: int
+    test_example_trim_second_chars: int
+    test_target_trim_final_chars: int
+    test_example_trim_final_chars: int
+
 
 @dataclass(slots=True)
 class RuntimeConfig:
@@ -76,6 +123,8 @@ class RuntimeConfig:
     repair_max_reference_chars: int
     trace: TraceSettings
     prompt_budget: PromptBudgetSettings
+    budget_strategy: BudgetStrategySettings
+    prompt_assembly: PromptAssemblySettings
     config_path: str
 
 
@@ -169,6 +218,8 @@ def load_config(config_path: str | Path | None = None) -> RuntimeConfig:
     defaults_cfg = cg.get('defaults') or {}
     trace_cfg = cg.get('trace') or {}
     prompt_budget_cfg = cg.get('prompt_budget') or {}
+    budget_strategy_cfg = cg.get('budget_strategy') or {}
+    prompt_assembly_cfg = cg.get('prompt_assembly') or {}
     return RuntimeConfig(
         ollama=OllamaSettings(
             base_url=str(oll.get('base_url', '')).strip(),
@@ -209,6 +260,48 @@ def load_config(config_path: str | Path | None = None) -> RuntimeConfig:
             generate_chars_limit=int(prompt_budget_cfg.get('generate_chars_limit', 5600)),
             generate_test_chars_limit=int(prompt_budget_cfg.get('generate_test_chars_limit', 5400)),
             repair_chars_limit=int(prompt_budget_cfg.get('repair_chars_limit', 5600)),
+            min_user_prompt_chars=int(prompt_budget_cfg.get('min_user_prompt_chars', 400)),
+            user_prompt_reserve_chars=int(prompt_budget_cfg.get('user_prompt_reserve_chars', 100)),
+        ),
+        budget_strategy=BudgetStrategySettings(
+            generate_module_outline_keep=int(budget_strategy_cfg.get('generate_module_outline_keep', 4)),
+            generate_related_tests_keep=int(budget_strategy_cfg.get('generate_related_tests_keep', 1)),
+            generate_related_test_source_limit=int(budget_strategy_cfg.get('generate_related_test_source_limit', 450)),
+            generate_target_source_limit=int(budget_strategy_cfg.get('generate_target_source_limit', 1400)),
+            generate_test_drop_reference=bool(budget_strategy_cfg.get('generate_test_drop_reference', True)),
+            generate_test_module_outline_keep=int(budget_strategy_cfg.get('generate_test_module_outline_keep', 2)),
+            generate_test_related_tests_keep=int(budget_strategy_cfg.get('generate_test_related_tests_keep', 1)),
+            generate_test_related_test_source_limit=int(budget_strategy_cfg.get('generate_test_related_test_source_limit', 500)),
+            generate_test_target_source_limit=int(budget_strategy_cfg.get('generate_test_target_source_limit', 1400)),
+            repair_drop_reference=bool(budget_strategy_cfg.get('repair_drop_reference', True)),
+            repair_module_outline_keep=int(budget_strategy_cfg.get('repair_module_outline_keep', 2)),
+            repair_verification_message_limit=int(budget_strategy_cfg.get('repair_verification_message_limit', 300)),
+            repair_previous_artifact_code_limit=int(budget_strategy_cfg.get('repair_previous_artifact_code_limit', 1200)),
+            repair_related_tests_keep=int(budget_strategy_cfg.get('repair_related_tests_keep', 1)),
+            repair_related_test_source_limit=int(budget_strategy_cfg.get('repair_related_test_source_limit', 450)),
+            repair_target_source_limit=int(budget_strategy_cfg.get('repair_target_source_limit', 900)),
+        ),
+        prompt_assembly=PromptAssemblySettings(
+            coder_related_tests_max_items=int(prompt_assembly_cfg.get('coder_related_tests_max_items', 1)),
+            coder_related_tests_per_item_chars=int(prompt_assembly_cfg.get('coder_related_tests_per_item_chars', 500)),
+            coder_soft_module_outline_chars=int(prompt_assembly_cfg.get('coder_soft_module_outline_chars', 400)),
+            coder_runtime_request_chars=int(prompt_assembly_cfg.get('coder_runtime_request_chars', 220)),
+            coder_runtime_target_chars=int(prompt_assembly_cfg.get('coder_runtime_target_chars', 220)),
+            coder_runtime_module_outline_chars=int(prompt_assembly_cfg.get('coder_runtime_module_outline_chars', 120)),
+            coder_runtime_related_tests_min_chars=int(prompt_assembly_cfg.get('coder_runtime_related_tests_min_chars', 180)),
+            repair_target_source_chars=int(prompt_assembly_cfg.get('repair_target_source_chars', 900)),
+            repair_previous_code_chars=int(prompt_assembly_cfg.get('repair_previous_code_chars', 1200)),
+            repair_full_file_source_chars=int(prompt_assembly_cfg.get('repair_full_file_source_chars', 700)),
+            test_example_chars=int(prompt_assembly_cfg.get('test_example_chars', 900)),
+            test_example_trim_chars=int(prompt_assembly_cfg.get('test_example_trim_chars', 520)),
+            test_target_trim_first_chars=int(prompt_assembly_cfg.get('test_target_trim_first_chars', 1100)),
+            test_target_trim_second_chars=int(prompt_assembly_cfg.get('test_target_trim_second_chars', 800)),
+            test_request_trim_first_chars=int(prompt_assembly_cfg.get('test_request_trim_first_chars', 420)),
+            test_request_trim_second_chars=int(prompt_assembly_cfg.get('test_request_trim_second_chars', 220)),
+            test_related_tests_trim_min_chars=int(prompt_assembly_cfg.get('test_related_tests_trim_min_chars', 220)),
+            test_example_trim_second_chars=int(prompt_assembly_cfg.get('test_example_trim_second_chars', 320)),
+            test_target_trim_final_chars=int(prompt_assembly_cfg.get('test_target_trim_final_chars', 520)),
+            test_example_trim_final_chars=int(prompt_assembly_cfg.get('test_example_trim_final_chars', 160)),
         ),
         config_path=str(path),
     )
