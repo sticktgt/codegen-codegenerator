@@ -25,4 +25,4 @@
 {planner_json}
 
 Сводка неуспешных проверок:
-{verification_summary_json}{module_outline_block}{target_function_block}{reference_function_block}{full_file_source_block}
+{verification_summary_json}{module_outline_block}{target_function_block}{reference_function_block}{full_file_source_block}{change_request_preserve_block}{constraints_preserve_block}{repair_instruction_block}{reference_context_block}

@@ -1,20 +1,10 @@
 from __future__ import annotations
 
-import pytest
-
-from support_app.domain.models import Ticket
-from support_app.services.notification_service import build_assignment_message
-from support_app.services.validation import validate_discount_percent
+from demo_app.domain.models import Ticket
+from demo_app.services.notification_service import build_assignment_message
 
 
 def test_build_assignment_message_success() -> None:
-    ticket = Ticket(ticket_id="T-1", title="Broken button", description="Save button does not work")
-
-    message = build_assignment_message(ticket, "alice")
-
-    assert message == "Тикет T-1 успешно назначен сотруднику alice."
-
-
-def test_validate_discount_percent_raises_for_negative_value() -> None:
-    with pytest.raises(ValueError):
-        validate_discount_percent(-1)
+    ticket = Ticket(ticket_id='T-1', title='Broken button', description='Save button does not work')
+    message = build_assignment_message(ticket, 'alice')
+    assert message == 'Тикет T-1 назначен агенту alice.'
