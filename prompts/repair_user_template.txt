@@ -3,20 +3,26 @@
 Верни только валидный JSON, соответствующий требуемому контракту.
 
 Правила исправления:
-- Используй только operation="replace_function".
-- Меняй только target_symbol в указанном target_file.
+- Сохраняй requested operation из параметров задачи.
+- Для замены существующего symbol используй только operation="replace_symbol".
+- Для вставки нового symbol после anchor-symbol используй только operation="insert_after_symbol".
+- Не используй значения "replace_function", "modify_function", "add_function" или "add_symbol".
+- Меняй только target_symbol в указанном target_file или вставляемый новый symbol для anchor.
 - Не меняй другие функции и не делай широкий рефакторинг.
 - Исправляй только то, что нужно для прохождения проверок.
 - Сохраняй стиль окружающего Python-кода.
 - Все текстовые значения JSON пиши на русском языке.
 - Если добавляешь или меняешь текст ошибки в коде, используй русский язык.
-- Сосредоточься на кратком исправлении целевой функции.
 - Не пытайся исправлять тестовые файлы или инфраструктурный код.
-- Если целевая функция уже выглядит корректной, верни минимально возможную правку этой же функции.
+- Если requested operation=insert_after_symbol, не меняй anchor-symbol и верни только код нового symbol.
+- Если requested operation=insert_after_symbol, заполни поле insert_after значением anchor qualname.
+- Если целевая правка уже выглядит корректной, верни минимально возможную правку в рамках того же operation.
 
 Параметры задачи:
+- requested_operation: {requested_operation}
 - target_file: {target_file}
 - target_symbol: {target_symbol}
+- insert_after: {insert_after}
 
 Исходный запрос пользователя:
 {request}

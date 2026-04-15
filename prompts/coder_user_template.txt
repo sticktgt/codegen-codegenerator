@@ -10,18 +10,26 @@
 - Если в итоговом коде останется новый английский текст ошибки, ответ считается некорректным.
 
 Требования к полю operation:
-- Для изменения существующей функции используй только значение "replace_function".
-- Для добавления новой функции используй только значение "add_function".
-- Не используй значение "modify_function" в ответе coder.
+- Для замены существующего symbol используй только значение "replace_symbol".
+- Для вставки нового symbol после anchor-symbol используй только значение "insert_after_symbol".
+- Не используй значения "replace_function", "modify_function", "add_function" или "add_symbol".
 
 Требования к изменению:
 - Меняй только один указанный target.
 - Не добавляй внешние зависимости.
 - Не делай лишний рефакторинг.
 - Сохраняй стиль существующего Python-кода.
-- Если operation=modify_function, верни полную обновленную функцию, но в JSON укажи operation="replace_function".
-- Если operation=add_function, верни полную новую функцию.
-- Если operation=add_function, добавь короткий docstring на русском языке сразу после сигнатуры новой функции.
+- Если operation=replace_symbol, верни полный обновленный код существующего symbol.
+- Если operation=insert_after_symbol, верни только полный код нового symbol, который должен быть вставлен после anchor-symbol.
+- Если operation=insert_after_symbol, заполни поле insert_after значением anchor qualname из параметров задачи.
+- Если operation=insert_after_symbol, не меняй код anchor-symbol.
+- Если operation=insert_after_symbol, поле code должно начинаться сразу с объявления нового class или def.
+- Если operation=insert_after_symbol, не добавляй строки import ... или from ... import ... в начале code.
+- Даже если нужный import кажется необходимым, не включай его в code; возвращай только новый symbol.
+- Если operation=insert_after_symbol и создается новый class или function без docstring, добавь короткий docstring на русском языке сразу после сигнатуры.
+- Если target-код работает с объектом предметной области, используй только те атрибуты этого объекта, которые явно видны в доступном контексте.
+- Не заменяй имена параметров, полей и атрибутов доменных объектов на синонимы или более "удобные" варианты.
+- Если структура объекта известна частично, сохраняй уже видимый способ работы с объектом и не реконструируй его заново по предположению.
 
 Параметры задачи:
 - operation: {operation}
@@ -34,16 +42,4 @@
 {planner_json}
 
 Запрос пользователя:
-{request}
-
-Структура модуля:
-{module_outline}
-
-Целевая функция:
-{target_function}
-
-Функция-образец:
-{reference_function}
-
-Полный исходный текст файла:
-{full_file_source}
+{request}{module_outline_block}{target_function_block}{reference_function_block}{full_file_source_block}{related_tests_block}

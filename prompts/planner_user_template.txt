@@ -18,6 +18,9 @@
 - Поле reference_symbol может быть null.
 - Все текстовые значения в JSON пиши на русском языке.
 - Не смешивай русский и английский язык в тексте ответа.
+- Для замены существующего symbol используй только operation="replace_symbol".
+- Для вставки нового symbol после anchor-symbol используй только operation="insert_after_symbol".
+- Если requested operation=insert_after_symbol, поле target_symbol — это anchor-symbol, после которого должен быть добавлен новый symbol.
 
 Входные данные:
 Experiment name: {experiment_name}

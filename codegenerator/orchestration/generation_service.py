@@ -269,6 +269,17 @@ def _merge_llm_usage(existing: dict[str, Any] | None, new_usage: dict[str, Any])
         merged[key] = round(float(merged.get(key, 0.0)) + float(new_usage.get(key, 0.0)), 6)
     return merged
 
+def _canonicalize_code_result_for_request(
+    parsed: dict[str, Any],
+    requested_operation: str | None,
+    target_qualname: str | None,
+) -> dict[str, Any]:
+    requested = str(requested_operation or '').strip().lower()
+    if requested == 'insert_after_symbol' and parsed.get('operation') == 'add_symbol':
+        parsed['operation'] = 'insert_after_symbol'
+        parsed['insert_after'] = parsed.get('insert_after') or target_qualname
+    return parsed
+
 def _build_generated_code_context(code_artifact: CodeArtifact) -> dict[str, Any]:
     return {
         "operation": code_artifact.operation,
@@ -408,6 +419,12 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
             extra_payload={"context_metrics": coder_context_metrics},
         )
 
+        code_result = _canonicalize_code_result_for_request(
+            code_result,
+            request.target.get("operation"),
+            request.target.get("qualname"),
+        )        
+
         code_artifact = CodeArtifact(
             operation=code_result["operation"],
             target_qualname=request.target.get("qualname", ""),
@@ -423,9 +440,20 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
 
         test_artifact = None
         mode = str(request.options.get("generate_test_mode", config.test_generation_mode))
+
+        effective_requested_operation = (
+            str(getattr(request, "requested_operation", "") or "").strip()
+            or str(request.target.get("operation", "") or "").strip()
+            or str(code_artifact.operation or "").strip()
+            or "replace_symbol"
+        )
+
         if mode == "always" or (
             mode == "if_missing" and not request.project_context.get("related_tests")
         ):
+            request.target["operation"] = effective_requested_operation
+            request.requested_operation = effective_requested_operation
+                        
             test_request, test_request_dict, _, available_user_chars = _prepare_request_with_budget(
                 request=request,
                 request_cls=GenerationRequest,
@@ -456,6 +484,54 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
                 generated_code_artifact=generated_code_context,
             )
 
+            logger.info(
+                "test generation resolved symbols request_id=%s operation=%s effective_target_symbol=%s anchor_symbol=%s",
+                test_request.request_id,
+                effective_requested_operation,
+                test_context_metrics.get("test_effective_target_symbol"),
+               test_context_metrics.get("test_anchor_symbol"),
+            )
+            logger.info(
+                "test generation prompt inputs request_id=%s effective_target_kind=%s effective_target_name=%s generated_code_context_keys=%s",
+                test_request.request_id,
+                test_context_metrics.get("test_effective_target_kind"),
+                test_context_metrics.get("test_effective_target_name"),
+                sorted(generated_code_context.keys()),
+            )
+            logger.info(
+                "test generation related context request_id=%s related_tests_count=%s related_test_chars=%s example_included=%s example_chars=%s trim_applied=%s",
+                test_request.request_id,
+                test_context_metrics.get("test_related_tests_count"),
+                test_context_metrics.get("test_related_test_chars"),
+                test_context_metrics.get("test_example_included"),
+                test_context_metrics.get("test_example_chars"),
+                test_context_metrics.get("test_trim_applied"),
+            )
+            logger.info(
+                "test generation prompt budget request_id=%s before=%s after=%s available_user_prompt_chars=%s target_chars=%s request_chars=%s source=%s",
+                test_request.request_id,
+                test_context_metrics.get("test_prompt_chars_before_trim"),
+                test_context_metrics.get("test_prompt_chars_after_trim"),
+                available_user_chars,
+                test_context_metrics.get("test_target_chars"),
+                test_context_metrics.get("test_request_chars"),
+                test_context_metrics.get("test_target_source_origin"),
+            )
+
+            logger.info(
+                "test generation resolved symbols request_id=%s operation=%s effective_target_symbol=%s anchor_symbol=%s",
+                test_request.request_id,
+                effective_requested_operation,
+                test_context_metrics.get("test_effective_target_symbol"),
+                test_context_metrics.get("test_anchor_symbol"),
+            )
+            logger.info(
+                "test generation prompt inputs request_id=%s effective_target_kind=%s effective_target_name=%s generated_code_context_keys=%s",
+                test_request.request_id,
+                test_context_metrics.get("test_effective_target_kind"),
+                test_context_metrics.get("test_effective_target_name"),
+                sorted(generated_code_context.keys()),
+            )            
             logger.info(
                 "test_generator context request_id=%s before=%s after=%s target_chars=%s example_chars=%s request_chars=%s related_test_chars=%s related_tests_count=%s source=%s",
                 test_request.request_id,
@@ -581,6 +657,62 @@ def generate_test(request: GenerationRequest, config_path: str) -> GenerationRes
         )
 
         logger.info(
+            "generate_test resolved symbols request_id=%s operation=%s effective_target_symbol=%s anchor_symbol=%s",
+            request.request_id,
+            (
+                str(getattr(request, "requested_operation", "") or "").strip()
+                or str(request.target.get("operation", "") or "").strip()
+                or "replace_symbol"
+            ),
+            test_context_metrics.get("test_effective_target_symbol"),
+            test_context_metrics.get("test_anchor_symbol"),
+        )
+        logger.info(
+            "generate_test prompt inputs request_id=%s effective_target_kind=%s effective_target_name=%s generated_code_context_keys=%s",
+            request.request_id,
+            test_context_metrics.get("test_effective_target_kind"),
+            test_context_metrics.get("test_effective_target_name"),
+            sorted((request.generated_code_artifact or {}).keys()),
+        )
+        logger.info(
+            "generate_test related context request_id=%s related_tests_count=%s related_test_chars=%s example_included=%s example_chars=%s trim_applied=%s",
+            request.request_id,
+            test_context_metrics.get("test_related_tests_count"),
+            test_context_metrics.get("test_related_test_chars"),
+            test_context_metrics.get("test_example_included"),
+            test_context_metrics.get("test_example_chars"),
+            test_context_metrics.get("test_trim_applied"),
+        )
+        logger.info(
+            "generate_test prompt budget request_id=%s before=%s after=%s available_user_prompt_chars=%s target_chars=%s request_chars=%s source=%s",
+            request.request_id,
+            test_context_metrics.get("test_prompt_chars_before_trim"),
+            test_context_metrics.get("test_prompt_chars_after_trim"),
+            available_user_chars,
+            test_context_metrics.get("test_target_chars"),
+            test_context_metrics.get("test_request_chars"),
+            test_context_metrics.get("test_target_source_origin"),
+        )
+
+        logger.info(
+            "generate_test resolved symbols request_id=%s operation=%s effective_target_symbol=%s anchor_symbol=%s",
+            request.request_id,
+            (
+                str(getattr(request, "requested_operation", "") or "").strip()
+                or str(request.target.get("operation", "") or "").strip()
+                or "replace_symbol"
+            ),
+            test_context_metrics.get("test_effective_target_symbol"),
+            test_context_metrics.get("test_anchor_symbol"),
+        )        
+        logger.info(
+            "generate_test prompt inputs request_id=%s effective_target_kind=%s effective_target_name=%s generated_code_context_keys=%s",
+            request.request_id,
+            test_context_metrics.get("test_effective_target_kind"),
+            test_context_metrics.get("test_effective_target_name"),
+            sorted((request.generated_code_artifact or {}).keys()),
+        )
+        logger.info(
             "generate_test context request_id=%s before=%s after=%s target_chars=%s example_chars=%s request_chars=%s source=%s",
             request.request_id,
             test_context_metrics.get("test_prompt_chars_before_trim"),
@@ -683,6 +815,12 @@ def repair(request: RepairRequest, config_path: str) -> GenerationResult:
             config=config,
         )
 
+        requested_operation = (
+            getattr(request, "requested_operation", None)
+            or request.previous_artifact.get("operation")
+            or "replace_symbol"
+        )
+
         repair_prompt = build_repair_user_prompt(
             prompts["repair_user_template"],
             request,
@@ -722,6 +860,14 @@ def repair(request: RepairRequest, config_path: str) -> GenerationResult:
             step_name_for_gateway="repair",
             parser=parse_repair_response,
             extra_payload={"context_metrics": request_dict.get("context_metrics", {})},
+        )
+
+        repair_result = _canonicalize_code_result_for_request(
+            repair_result,
+            requested_operation,
+            request.previous_artifact.get("insert_after")
+            or request.previous_artifact.get("target_qualname")
+            or request.previous_artifact.get("target_symbol"),
         )
 
         code_artifact = CodeArtifact(
