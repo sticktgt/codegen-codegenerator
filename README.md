@@ -56,7 +56,7 @@
 5. построение coder prompt;
 6. вызов coder model;
 7. разбор ответа в `code_artifact`;
-8. нормализация операции (`replace_symbol`, `insert_after_symbol`, ограниченная backward-compatible нормализация старых alias);
+8. валидация canonical operation (`replace_symbol` или `insert_after_symbol`);
 9. возврат `GenerationResult`.
 
 Результат режима:
@@ -257,12 +257,10 @@ python -m codegenerator repair --request-file <request_file> --config <config_pa
     "recommended_tests": []
   },
   "reference_context": {
-    "reference_summary": {},
     "reference_artifacts": []
   },
   "generated_code_artifact": {},
-  "options": {},
-  "context_metrics": {}
+  "options": {}  
 }
 ```
 
@@ -312,7 +310,6 @@ python -m codegenerator repair --request-file <request_file> --config <config_pa
 
 Поля:
 
-- `reference_summary`;
 - `reference_artifacts`.
 
 #### `generated_code_artifact`
@@ -322,7 +319,7 @@ python -m codegenerator repair --request-file <request_file> --config <config_pa
 Опции генерации.
 
 #### `context_metrics`
-Метрики размера request и его частей.
+Служебные метрики budget/trimming, которые формируются внутри `codegenerator` и сохраняются в trace. Не являются обязательной частью внешнего request-контракта.
 
 ---
 
@@ -550,7 +547,7 @@ Budget strategy и работа с контекстом.
 - `replace_symbol` — заменить существующий symbol;
 - `insert_after_symbol` — вставить новый symbol после указанного anchor symbol.
 
-`add_function`, `replace_function` и другие старые значения считаются legacy-alias на уровне парсинга, но новые prompt и новая генерация должны использовать только canonical значения.
+Любое значение операции, отличное от `replace_symbol` и `insert_after_symbol`, считается ошибкой контракта.
 
 Для `insert_after_symbol` генератор должен вернуть:
 

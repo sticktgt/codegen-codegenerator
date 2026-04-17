@@ -377,8 +377,8 @@ def build_coder_user_prompt(
 
 def _build_reference_context_block(reference_context: dict[str, Any], runtime_config: RuntimeConfig | None) -> str:
     max_chars = runtime_config.repair_max_reference_chars if runtime_config else 420
+    artifacts = list(reference_context.get("reference_artifacts") or [])[:1]
     compact_reference = {
-        "reference_summary": reference_context.get("reference_summary", {}),
         "reference_artifacts": [
             {
                 "title": item.get("title", ""),
@@ -386,7 +386,7 @@ def _build_reference_context_block(reference_context: dict[str, Any], runtime_co
                 "content_mode": item.get("content_mode", ""),
                 "content": _truncate_text(str(item.get("content", "") or ""), max_chars)[0],
             }
-            for item in list(reference_context.get("reference_artifacts") or [])[:1]
+            for item in artifacts
         ],
     }
     return _pretty(compact_reference)
@@ -441,8 +441,7 @@ def build_repair_user_prompt(
     extra_blocks = _build_repair_extra_blocks(change_request_text, constraints, reference_context_text)
 
     requested_operation = (
-        getattr(request, "requested_operation", None)
-        or request.previous_artifact.get("operation")
+        request.previous_artifact.get("operation")
         or "replace_symbol"
     )
     values = {
@@ -468,7 +467,7 @@ def build_repair_user_prompt(
     prompt = template_text.format(**values)
 
     if runtime_config and len(prompt) > runtime_config.repair_prompt_hard_limit:
-        values["reference_context_block"] = "\n\nСправочный контекст:\n" + _pretty({"reference_summary": (request.reference_context or {}).get("reference_summary", {}), "reference_artifacts": []})
+        values["reference_context_block"] = "\n\nСправочный контекст:\n" + _pretty({"reference_artifacts": []})
         prompt = template_text.format(**values)
     if runtime_config and len(prompt) > runtime_config.repair_prompt_hard_limit:
         values["module_outline_block"] = ""
@@ -525,8 +524,7 @@ def _resolve_test_target_symbol(
     generated_code_artifact: dict[str, Any] | None = None,
 ) -> tuple[str, str | None]:
     requested_operation = (
-        str(getattr(request, "requested_operation", "") or "").strip()
-        or str(request.target.get("operation", "") or "").strip()
+        str(request.target.get("operation", "") or "").strip()
         or "replace_symbol"
     )
 
@@ -579,10 +577,7 @@ def _build_test_prompt_values(
     )
 
     return {
-        "operation": (
-            getattr(request, "requested_operation", None)
-            or request.target.get("operation", "replace_symbol")
-        ),
+        "operation": request.target.get("operation", "replace_symbol"),
         "target_file": request.target.get("file_path", ""),
         "target_symbol": effective_target_symbol,
         "effective_target_kind": effective_target_kind,
@@ -700,8 +695,7 @@ def build_test_generator_user_prompt(
     inferred_symbols_text = "\n".join(f"- {name}" for name in inferred_symbols)
 
     requested_operation = (
-        str(getattr(request, "requested_operation", "") or "").strip()
-        or str(request.target.get("operation", "") or "").strip()
+        str(request.target.get("operation", "") or "").strip()
         or "replace_symbol"
     )
 

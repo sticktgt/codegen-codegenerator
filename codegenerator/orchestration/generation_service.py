@@ -271,13 +271,21 @@ def _merge_llm_usage(existing: dict[str, Any] | None, new_usage: dict[str, Any])
 
 def _canonicalize_code_result_for_request(
     parsed: dict[str, Any],
-    requested_operation: str | None,
+    expected_operation: str | None,
     target_qualname: str | None,
 ) -> dict[str, Any]:
-    requested = str(requested_operation or '').strip().lower()
-    if requested == 'insert_after_symbol' and parsed.get('operation') == 'add_symbol':
-        parsed['operation'] = 'insert_after_symbol'
+    operation = str(parsed.get('operation', '') or '').strip().lower()
+    expected = str(expected_operation or '').strip().lower()
+
+    if operation not in {'replace_symbol', 'insert_after_symbol'}:
+        raise ValueError(f'Unsupported operation returned by model: {operation}')
+
+    if expected and operation != expected:
+        raise ValueError(f'Generator returned operation {operation}, expected {expected}')
+
+    if operation == 'insert_after_symbol':
         parsed['insert_after'] = parsed.get('insert_after') or target_qualname
+
     return parsed
 
 def _build_generated_code_context(code_artifact: CodeArtifact) -> dict[str, Any]:
@@ -442,8 +450,7 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
         mode = str(request.options.get("generate_test_mode", config.test_generation_mode))
 
         effective_requested_operation = (
-            str(getattr(request, "requested_operation", "") or "").strip()
-            or str(request.target.get("operation", "") or "").strip()
+            str(request.target.get("operation", "") or "").strip()
             or str(code_artifact.operation or "").strip()
             or "replace_symbol"
         )
@@ -452,7 +459,6 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
             mode == "if_missing" and not request.project_context.get("related_tests")
         ):
             request.target["operation"] = effective_requested_operation
-            request.requested_operation = effective_requested_operation
                         
             test_request, test_request_dict, _, available_user_chars = _prepare_request_with_budget(
                 request=request,
@@ -660,8 +666,7 @@ def generate_test(request: GenerationRequest, config_path: str) -> GenerationRes
             "generate_test resolved symbols request_id=%s operation=%s effective_target_symbol=%s anchor_symbol=%s",
             request.request_id,
             (
-                str(getattr(request, "requested_operation", "") or "").strip()
-                or str(request.target.get("operation", "") or "").strip()
+                str(request.target.get("operation", "") or "").strip()
                 or "replace_symbol"
             ),
             test_context_metrics.get("test_effective_target_symbol"),
@@ -698,8 +703,7 @@ def generate_test(request: GenerationRequest, config_path: str) -> GenerationRes
             "generate_test resolved symbols request_id=%s operation=%s effective_target_symbol=%s anchor_symbol=%s",
             request.request_id,
             (
-                str(getattr(request, "requested_operation", "") or "").strip()
-                or str(request.target.get("operation", "") or "").strip()
+                str(request.target.get("operation", "") or "").strip()
                 or "replace_symbol"
             ),
             test_context_metrics.get("test_effective_target_symbol"),
@@ -816,8 +820,7 @@ def repair(request: RepairRequest, config_path: str) -> GenerationResult:
         )
 
         requested_operation = (
-            getattr(request, "requested_operation", None)
-            or request.previous_artifact.get("operation")
+            request.previous_artifact.get("operation")
             or "replace_symbol"
         )
 

@@ -16,7 +16,6 @@ class GenerationRequest(RequestBase):
     generated_code_artifact: dict[str, Any] = field(default_factory=dict)
     options: dict[str, Any] = field(default_factory=dict)
     context_metrics: dict[str, Any] = field(default_factory=dict)
-    requested_operation: str = "replace_symbol"
 
 @dataclass(slots=True)
 class RepairRequest(RequestBase):
@@ -27,4 +26,3 @@ class RepairRequest(RequestBase):
     project_context: dict[str, Any]
     reference_context: dict[str, Any] = field(default_factory=dict)
     options: dict[str, Any] = field(default_factory=dict)
-    requested_operation: str = "replace_symbol"

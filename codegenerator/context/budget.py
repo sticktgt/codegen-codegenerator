@@ -50,11 +50,6 @@ def _drop_all_reference_artifacts(request: dict[str, Any], trim_log: list[str]) 
             f"removed all reference_artifacts: {len(artifacts)} items, chars={_sum_reference_chars(artifacts)}"
         )
     reference_context["reference_artifacts"] = []
-    reference_context["reference_summary"] = {
-        "count": 0,
-        "titles": [],
-        "content_modes": [],
-    }
 
 
 def _keep_single_test_example(request: dict[str, Any], trim_log: list[str]) -> None:
@@ -69,11 +64,6 @@ def _keep_single_test_example(request: dict[str, Any], trim_log: list[str]) -> N
             f"trimmed reference_artifacts for generate-test: {len(artifacts)} -> 1"
         )
     reference_context["reference_artifacts"] = kept
-    reference_context["reference_summary"] = {
-        "count": len(kept),
-        "titles": [str(x.get("title", "")) for x in kept],
-        "content_modes": [str(x.get("content_mode", "")) for x in kept],
-    }
 
 
 def _trim_module_outline(request: dict[str, Any], keep: int, trim_log: list[str]) -> None:
