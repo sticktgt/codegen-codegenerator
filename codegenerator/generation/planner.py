@@ -40,3 +40,24 @@ def validate_planner_result(parsed: dict[str, Any]) -> dict[str, Any]:
 
 def parse_planner_response(content: str) -> dict[str, Any]:
     return validate_planner_result(parse_llm_json(content))
+
+def validate_test_planner_result(parsed: dict[str, Any]) -> dict[str, Any]:
+    required = ['target_symbol', 'test_intent', 'must_use_symbols', 'avoid']
+    missing = [key for key in required if key not in parsed]
+    if missing:
+        raise ValueError(f"test planner result is missing required keys: {', '.join(missing)}")
+
+    if not isinstance(parsed.get('must_use_symbols'), list):
+        raise ValueError("test planner result field 'must_use_symbols' must be a JSON array")
+    if not isinstance(parsed.get('avoid'), list):
+        raise ValueError("test planner result field 'avoid' must be a JSON array")
+
+    parsed.setdefault('notes', [])
+    if not isinstance(parsed.get('notes'), list):
+        raise ValueError("test planner result field 'notes' must be a JSON array")
+
+    return parsed
+
+
+def parse_test_planner_response(content: str) -> dict[str, Any]:
+    return validate_test_planner_result(parse_llm_json(content))

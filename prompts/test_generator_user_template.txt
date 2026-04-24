@@ -29,6 +29,8 @@
 - Не придумывай поведение, которого нет в target-коде, связанных тестах, полном исходнике файла или явных требованиях.
 - Для dataclass без собственной логики по умолчанию достаточно одного узкого позитивного теста на создание экземпляра и значения полей.
 - Негативные тесты добавляй только если они прямо следуют из переданного контекста.
+- План теста ниже обязателен к исполнению, если он не противоречит более надежному проектному контексту.
+- Если target_symbol импортирован, он должен реально использоваться в тесте — либо в вызове, либо в создании экземпляра, либо в assert-проверке результата.
 
 Параметры задачи:
 - operation: {operation}
@@ -39,4 +41,13 @@
 - generated_test_file: {generated_test_file}
 
 Запрос пользователя:
-{request}{target_function_block}{full_file_source_block}{example_test_block}{related_tests_block}{import_context_block}{inferred_symbols_block}
+{request}
+
+{test_plan_block}
+{source_priority_block}
+{target_function_block}
+{full_file_source_block}
+{example_test_block}
+{related_tests_block}
+{import_context_block}
+{inferred_symbols_block}

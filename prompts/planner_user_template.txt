@@ -23,7 +23,6 @@
 - Если requested operation=insert_after_symbol, поле target_symbol — это anchor-symbol, после которого должен быть добавлен новый symbol.
 
 Входные данные:
-Experiment name: {experiment_name}
 Operation: {operation}
 Target file: {target_file}
 Target symbol: {target_symbol}
@@ -32,3 +31,13 @@ Reference symbol: {reference_symbol}
 
 Запрос пользователя:
 {request}
+
+{module_outline_block}
+
+{target_function_block}
+
+{full_file_source_block}
+
+{related_tests_block}
+
+{reference_function_block}

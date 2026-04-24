@@ -16,6 +16,7 @@ class GenerationRequest(RequestBase):
     generated_code_artifact: dict[str, Any] = field(default_factory=dict)
     options: dict[str, Any] = field(default_factory=dict)
     context_metrics: dict[str, Any] = field(default_factory=dict)
+    test_plan: dict[str, Any] = field(default_factory=dict)    
 
 @dataclass(slots=True)
 class RepairRequest(RequestBase):

@@ -10,6 +10,7 @@ class GenerationResult:
     code_artifact: CodeArtifact | None = None
     test_artifact: TestArtifact | None = None
     planner_result: dict[str, Any] | None = None
+    test_planner_result: dict[str, Any] | None = None
     warnings: list[str] = field(default_factory=list)
     trace_path: str | None = None
     llm_usage: dict[str, Any] | None = None
@@ -22,6 +23,7 @@ class GenerationResult:
             'code_artifact': self.code_artifact.to_dict() if self.code_artifact else None,
             'test_artifact': self.test_artifact.to_dict() if self.test_artifact else None,
             'planner_result': self.planner_result,
+            'test_planner_result': self.test_planner_result,
             'warnings': self.warnings,
             'trace_path': self.trace_path,
             'llm_usage': self.llm_usage,

@@ -18,4 +18,5 @@ def load_prompts(config: RuntimeConfig) -> dict[str, str]:
         'repair_user_template': read_prompt_file(config.prompts.repair_user_template),
         'test_generator_user_template': read_prompt_file(config.prompts.test_generator_user_template),
         'test_generator_example_source': read_prompt_file(config.prompts.test_generator_example),
+        'test_planner_user_template': read_prompt_file(config.prompts.test_planner_user_template),
     }

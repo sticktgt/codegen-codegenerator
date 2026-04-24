@@ -15,7 +15,11 @@ class CallMeta:
     user_chars: int
 
 def create_client(config: RuntimeConfig) -> OllamaClient:
-    return OllamaClient(config.ollama.base_url, config.ollama.timeout_sec)
+    return OllamaClient(
+        base_url=config.ollama.base_url,
+        timeout_sec=config.ollama.timeout_sec,
+        api_key=config.ollama.api_key,
+    )
 
 def call_model(*, client: OllamaClient, model: str, system_prompt: str, user_prompt: str, think: bool | None, config: RuntimeConfig, step: str) -> tuple[OllamaCallResult, CallMeta]:
     meta = CallMeta(step=step, model=model, prompt_chars=len(system_prompt)+len(user_prompt), system_chars=len(system_prompt), user_chars=len(user_prompt))

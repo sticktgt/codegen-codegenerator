@@ -1,0 +1,35 @@
+Подготовь краткий план генерации pytest-теста.
+
+Верни только валидный JSON.
+
+Обязательные поля JSON:
+- target_symbol
+- test_intent
+- must_use_symbols
+- avoid
+
+Не придумывай отсутствующие import path, поля, методы, аргументы конструктора и атрибуты.
+Опирайся только на явно видимый контекст.
+План должен быть коротким и полезным именно для генерации одного тестового файла.
+Если operation=insert_after_symbol, target_symbol уже указывает на новый symbol для тестирования, а не на anchor-symbol.
+
+Change request:
+{request}
+
+Operation: {operation}
+Target file: {target_file}
+Target symbol: {target_symbol}
+
+Target source:
+{target_source}
+
+Full file source:
+{full_file_source}
+
+{related_tests_block}
+
+{import_context_block}
+
+{inferred_symbols_block}
+
+{source_priority_block}

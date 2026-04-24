@@ -34,10 +34,24 @@ class OllamaCallResult:
 
 
 class OllamaClient:
-    def __init__(self, base_url: str, timeout_sec: int = 180):
-        self.base_url = base_url.rstrip("/")
-        self.chat_url = f"{self.base_url}/api/chat"
+    def __init__(
+        self,
+        base_url: str,
+        timeout_sec: int = 180,
+        api_key: str | None = None,
+    ):
+        normalized_base_url = base_url.rstrip('/')
+
+        if normalized_base_url.endswith('/api'):
+            self.api_base_url = normalized_base_url
+            self.base_url = normalized_base_url[:-4]
+        else:
+            self.base_url = normalized_base_url
+            self.api_base_url = f'{normalized_base_url}/api'
+
+        self.chat_url = f'{self.api_base_url}/chat'
         self.timeout_sec = timeout_sec
+        self.api_key = (api_key or '').strip() or None
         self.session = requests.Session()
 
     def chat(
@@ -82,7 +96,18 @@ class OllamaClient:
 
         t0 = time.time()
         try:
-            r = self.session.post(self.chat_url, json=payload, timeout=self.timeout_sec)
+            # r = self.session.post(self.chat_url, json=payload, timeout=self.timeout_sec)
+            headers: Dict[str, str] = {}
+            if self.api_key:
+                headers['Authorization'] = f'Bearer {self.api_key}'
+
+            r = self.session.post(
+                self.chat_url,
+                json=payload,
+                headers=headers or None,
+                timeout=self.timeout_sec,
+            )
+
             if not r.ok:
                 logger.error("Ollama HTTP %s body: %s", r.status_code, (r.text or "")[:2000])
                 r.raise_for_status()

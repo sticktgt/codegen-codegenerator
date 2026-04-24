@@ -9,7 +9,10 @@ from typing import Any, Callable
 from codegenerator.config import load_config
 from codegenerator.context.budget import apply_budget_strategy
 from codegenerator.generation.coder import parse_code_response
-from codegenerator.generation.planner import parse_planner_response
+from codegenerator.generation.planner import (
+    parse_planner_response,
+    parse_test_planner_response,
+)
 from codegenerator.generation.repair import parse_repair_response
 from codegenerator.generation.test_generator import (
     build_generated_test_filename,
@@ -25,6 +28,7 @@ from codegenerator.prompts.prompt_builder import (
     build_planner_user_prompt,
     build_repair_user_prompt,
     build_test_generator_user_prompt,
+    build_test_planner_user_prompt,
 )
 from codegenerator.prompts.prompt_loader import load_prompts
 from codegenerator.trace.trace_store import build_trace_path, save_trace
@@ -316,10 +320,25 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
             config=config,
         )
 
-        planner_prompt = build_planner_user_prompt(
+        planner_prompt, planner_prompt_metrics = build_planner_user_prompt(
             prompts["planner_user_template"],
             request,
-            config.defaults_constraints,
+            available_user_chars=available_user_chars,
+            default_constraints=config.defaults_constraints,
+        )
+        logger.info(
+            "planner prompt metrics request_id=%s prompt_chars=%s request_chars=%s module_outline_chars=%s target_chars=%s full_file_chars=%s related_tests_count=%s related_test_chars=%s reference_count=%s reference_chars=%s default_constraints_count=%s",
+            request.request_id,
+            planner_prompt_metrics.get("planner_prompt_chars"),
+            planner_prompt_metrics.get("planner_request_chars"),
+            planner_prompt_metrics.get("planner_module_outline_chars"),
+            planner_prompt_metrics.get("planner_target_chars"),
+            planner_prompt_metrics.get("planner_full_file_chars"),
+            planner_prompt_metrics.get("planner_related_tests_count"),
+            planner_prompt_metrics.get("planner_related_test_chars"),
+            planner_prompt_metrics.get("planner_reference_count"),
+            planner_prompt_metrics.get("planner_reference_chars"),
+            planner_prompt_metrics.get("planner_default_constraints_count"),
         )
         _log_prompt_size(
             request_id=request.request_id,
@@ -480,6 +499,32 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
                 expected_test_file,
             )
 
+            test_planner_prompt, test_planner_metrics = build_test_planner_user_prompt(
+                prompts["test_planner_user_template"],
+                test_request,
+                generated_code_artifact=generated_code_context,
+                available_user_chars=available_user_chars,
+                default_constraints=config.defaults_constraints,
+                planner_result=planner_result,
+            )
+
+            test_planner_result, _, _ = _call_llm_with_trace(
+                trace=trace,
+                trace_step="test_planner",
+                error_step="test_planner_error",
+                request_id=test_request.request_id,
+                client=client,
+                model=config.models.planner_model,
+                system_prompt=prompts["system_rules"],
+                user_prompt=test_planner_prompt,
+                think=config.ollama.think,
+                config=config,
+                step_name_for_gateway="test_planner",
+                parser=parse_test_planner_response,
+                extra_payload={"context_metrics": test_planner_metrics},
+            )
+            test_request.test_plan = test_planner_result
+
             test_prompt, test_context_metrics = build_test_generator_user_prompt(
                 template_text=prompts["test_generator_user_template"],
                 request=test_request,
@@ -488,6 +533,7 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
                 runtime_config=config,
                 available_user_chars=available_user_chars,
                 generated_code_artifact=generated_code_context,
+                test_plan=test_request.test_plan,
             )
 
             logger.info(
@@ -598,6 +644,7 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
             code_artifact=code_artifact,
             test_artifact=test_artifact,
             planner_result=planner_result,
+            test_planner_result=(test_request.test_plan if test_artifact is not None else None),
             warnings=warnings,
             trace_path=str(trace_path),
             llm_usage=trace.get('llm_usage'),
@@ -645,10 +692,43 @@ def generate_test(request: GenerationRequest, config_path: str) -> GenerationRes
         )
 
         logger.info(
-            "generate_test request_id=%s model=%s planner=skipped target_source_origin=%s",
+            "generate_test request_id=%s models planner=%s test_generator=%s target_source_origin=%s",
             request.request_id,
+            config.models.planner_model,
             config.models.test_generator_model,
             target_source_origin,
+        )
+
+        test_planner_prompt, test_planner_metrics = build_test_planner_user_prompt(
+            prompts["test_planner_user_template"],
+            request,
+            generated_code_artifact=request.generated_code_artifact or None,
+            available_user_chars=available_user_chars,
+            default_constraints=config.defaults_constraints,
+        )
+        test_planner_result, _, _ = _call_llm_with_trace(
+            trace=trace,
+            trace_step="test_planner",
+            error_step="test_planner_error",
+            request_id=request.request_id,
+            client=client,
+            model=config.models.planner_model,
+            system_prompt=prompts["system_rules"],
+            user_prompt=test_planner_prompt,
+            think=config.ollama.think,
+            config=config,
+            step_name_for_gateway="test_planner",
+            parser=parse_test_planner_response,
+            extra_payload={"context_metrics": test_planner_metrics},
+        )
+
+        request.test_plan = test_planner_result
+        logger.info(
+            "generate_test planner_result request_id=%s target_symbol=%s must_use_symbols=%s avoid=%s",
+            request.request_id,
+            (request.test_plan or {}).get("target_symbol"),
+            (request.test_plan or {}).get("must_use_symbols"),
+            (request.test_plan or {}).get("avoid"),
         )
 
         expected_test_file = build_generated_test_filename(request)
@@ -660,6 +740,7 @@ def generate_test(request: GenerationRequest, config_path: str) -> GenerationRes
             runtime_config=config,
             generated_code_artifact=request.generated_code_artifact or None,
             available_user_chars=available_user_chars,
+            test_plan=request.test_plan,
         )
 
         logger.info(
@@ -697,24 +778,6 @@ def generate_test(request: GenerationRequest, config_path: str) -> GenerationRes
             test_context_metrics.get("test_target_chars"),
             test_context_metrics.get("test_request_chars"),
             test_context_metrics.get("test_target_source_origin"),
-        )
-
-        logger.info(
-            "generate_test resolved symbols request_id=%s operation=%s effective_target_symbol=%s anchor_symbol=%s",
-            request.request_id,
-            (
-                str(request.target.get("operation", "") or "").strip()
-                or "replace_symbol"
-            ),
-            test_context_metrics.get("test_effective_target_symbol"),
-            test_context_metrics.get("test_anchor_symbol"),
-        )        
-        logger.info(
-            "generate_test prompt inputs request_id=%s effective_target_kind=%s effective_target_name=%s generated_code_context_keys=%s",
-            request.request_id,
-            test_context_metrics.get("test_effective_target_kind"),
-            test_context_metrics.get("test_effective_target_name"),
-            sorted((request.generated_code_artifact or {}).keys()),
         )
         logger.info(
             "generate_test context request_id=%s before=%s after=%s target_chars=%s example_chars=%s request_chars=%s source=%s",
@@ -780,6 +843,7 @@ def generate_test(request: GenerationRequest, config_path: str) -> GenerationRes
             status="ok",
             test_artifact=test_artifact,
             planner_result=None,
+            test_planner_result=request.test_plan,
             trace_path=str(trace_path),
             llm_usage=trace.get('llm_usage'),
         )

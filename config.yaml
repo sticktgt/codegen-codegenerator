@@ -1,17 +1,18 @@
 llm:
   provider: "ollama"
   ollama:
-    base_url: "http://192.168.50.165:18081"
-    timeout_sec: 420
+    base_url: "http://192.168.50.165:18081" # "https://ollama.com" 
+    api_key: "" # "216e6158b5814e248dcb998a99d08e35.1bsbhaxOsnSUguqLphUFB3oa"
+    timeout_sec: 420 # 600
     think: false
     temperature: 0.0
-    num_ctx: 4096
-    num_predict: 600
+    num_ctx: 4096 # 32768
+    num_predict: 600 # 1200
     keep_alive: 0
-    options:
-      num_thread: 6
-      num_batch: 96
-      use_mmap: false
+    options: {}
+    #   num_thread: 6
+    #   num_batch: 96
+    #   use_mmap: false
 
 codegenerator:
   prompts:
@@ -21,12 +22,13 @@ codegenerator:
     repair_user_template: "prompts/repair_user_template.txt"
     test_generator_user_template: "prompts/test_generator_user_template.txt"
     test_generator_example: "prompts/test_example_pytest_raises.txt"
+    test_planner_user_template: "prompts/test_planner_user_template.txt"
 
   models:
-    planner_model: "qwen3:14b-q4_K_M"
-    coder_model: "qwen2.5-coder:14b-instruct-q4_K_M"
-    test_generator_model: "qwen2.5-coder:7b-instruct" # qwen2.5-coder:7b-instruct
-    repair_model: "qwen2.5-coder:14b-instruct-q4_K_M"
+    planner_model: "qwen3:14b-q4_K_M" # "gemma4:31b" 
+    coder_model: "qwen2.5-coder:14b-instruct-q4_K_M" # "devstral-small-2:24b" 
+    test_generator_model: "qwen2.5-coder:7b-instruct" # "devstral-small-2:24b" 
+    repair_model: "qwen2.5-coder:14b-instruct-q4_K_M" # "devstral-small-2:24b" #
 
   generation:
     repair_enabled: true

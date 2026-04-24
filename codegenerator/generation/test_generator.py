@@ -30,3 +30,13 @@ def parse_test_response(content: str, expected_test_file: str) -> dict:
         "test_file": expected_test_file,
         "code": code,
     }
+
+def extract_test_function_names(code: str) -> list[str]:
+    result: list[str] = []
+    for line in (code or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("def test_") and stripped.endswith(":"):
+            name = stripped[len("def "):].split("(", 1)[0].strip()
+            if name:
+                result.append(name)
+    return result

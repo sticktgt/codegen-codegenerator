@@ -193,25 +193,209 @@ def _compact_change_request_for_codegen(
     return "\n".join(lines).strip()
 
 
+def build_test_planner_user_prompt(
+    template_text: str,
+    request: GenerationRequest,
+    *,
+    generated_code_artifact: dict[str, Any] | None = None,
+    available_user_chars: int | None = None,
+    default_constraints: list[str] | None = None,
+    planner_result: dict[str, Any] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    pc = request.project_context or {}
+    target_symbol = pc.get("target_symbol") or {}
+    artifact_payload = _normalize_generated_code_artifact(generated_code_artifact)
+    default_constraints = [str(item) for item in (default_constraints or []) if item]
+
+    logger.info(
+        "build_test_planner_user_prompt artifact_type=%s normalized_keys=%s available_user_chars_type=%s default_constraints_count=%s",
+        type(generated_code_artifact).__name__,
+        sorted(artifact_payload.keys()),
+        type(available_user_chars).__name__,
+        len(default_constraints),
+    )
+
+    effective_target_symbol, anchor_symbol = _resolve_test_target_symbol(
+        request,
+        generated_code_artifact=generated_code_artifact,
+    )
+
+    if artifact_payload.get("code"):
+        target_source = str(artifact_payload.get("code") or "").strip()
+        target_source_origin = "generated_code_artifact"
+    else:
+        target_source = str(target_symbol.get("source") or "").strip()
+        target_source_origin = "project_context.target_symbol"
+
+    compact_request_text = _compact_change_request_for_codegen(
+        request.change_request,
+        planner_result=planner_result,
+    )
+    if default_constraints:
+        compact_request_text = (
+            compact_request_text
+            + "\nDefault constraints:\n"
+            + "\n".join(f"- {item}" for item in default_constraints[:8])
+        ).strip()
+
+    full_file_source = str(pc.get("full_file_source", "") or "").strip()
+    related_tests_text, related_test_metrics = _render_related_tests(
+        pc,
+        max_items=1,
+        per_item_chars=450,
+    )
+    if related_tests_text == "none":
+        related_tests_text = ""
+
+    import_context_text = _extract_import_context(full_file_source)
+    inferred_symbols = _infer_project_symbols(target_source)
+    inferred_symbols_text = "\n".join(f"- {name}" for name in inferred_symbols[:20])
+
+    if isinstance(available_user_chars, int) and available_user_chars > 0:
+        if len(full_file_source) > 900:
+            full_file_source, _ = _truncate_text(full_file_source, 900)
+        if len(related_tests_text) > 450:
+            related_tests_text, _ = _truncate_text(related_tests_text, 450)
+        if len(import_context_text) > 500:
+            import_context_text, _ = _truncate_text(import_context_text, 500)
+        if len(inferred_symbols_text) > 300:
+            inferred_symbols_text, _ = _truncate_text(inferred_symbols_text, 300)
+
+    values = {
+        "request": compact_request_text,
+        "target_file": request.target.get("file_path", ""),
+        "target_symbol": effective_target_symbol,
+        "operation": request.target.get("operation", "replace_symbol"),
+        "target_source": target_source or "none",
+        "full_file_source": full_file_source or "none",
+        "related_tests_block": _render_optional_block("Связанные тесты проекта", related_tests_text),
+        "import_context_block": _render_optional_block("Импорты из целевого файла", import_context_text),
+        "inferred_symbols_block": _render_optional_block("Символы проекта из target-кода", inferred_symbols_text),
+        "source_priority_block": _render_optional_block(
+            "Приоритет контекста",
+            "Сначала опирайся на связанные тесты, полный исходник файла и явные сигнатуры/импорты. Не придумывай отсутствующие import path, поля, методы и аргументы конструктора."
+        ),
+        "anchor_symbol": anchor_symbol or "null",
+    }
+
+    logger.info(
+        "build_test_planner_user_prompt template_vars=%s",
+        sorted(values.keys()),
+    )
+
+    prompt = template_text.format(**values)
+
+    metrics = {
+        "test_planner_target_source_origin": target_source_origin,
+        "test_planner_effective_target_symbol": effective_target_symbol,
+        "test_planner_anchor_symbol": anchor_symbol,
+        "test_planner_target_chars": len(target_source),
+        "test_planner_full_file_chars": len(full_file_source),
+        "test_planner_related_test_chars": int(related_test_metrics.get("related_test_chars", 0) or 0),
+        "test_planner_related_tests_count": int(related_test_metrics.get("related_tests_count", 0) or 0),
+        "test_planner_import_context_chars": len(import_context_text),
+        "test_planner_inferred_symbols_chars": len(inferred_symbols_text),
+        "test_planner_request_chars": len(compact_request_text),
+        "test_planner_prompt_chars": len(prompt),
+        "test_planner_default_constraints_count": len(default_constraints),
+    }
+    return prompt, metrics
+
 def build_planner_user_prompt(
     template_text: str,
     request: GenerationRequest,
-    default_constraints: list[str],
-) -> str:
-    cr = request.change_request
-    target = request.target
-    constraints = merged_constraints(cr.get("constraints", []), default_constraints)
-    request_text = ((cr.get("title", "") + "\n" + cr.get("description", "")).strip())
-    return template_text.format(
-        experiment_name=request.request_id,
-        operation=target.get("operation", "replace_symbol"),
-        target_file=target.get("file_path", ""),
-        target_symbol=target.get("qualname", ""),
-        insert_after=target.get("insert_after") or target.get("qualname", "") or "null",
-        reference_symbol="null",
-        request=request_text,
-    ) + "\n\nОграничения:\n" + _pretty(constraints)
+    *,
+    available_user_chars: int | None = None,
+    default_constraints: list[str] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    pc = request.project_context or {}
+    target_symbol = pc.get("target_symbol") or pc.get("target_function") or {}
+    default_constraints = [str(item) for item in (default_constraints or []) if item]
 
+    compact_request_text = _compact_change_request_for_codegen(
+        request.change_request,
+        planner_result=None,
+    )
+    if default_constraints:
+        compact_request_text = (
+            compact_request_text
+            + "\nDefault constraints:\n"
+            + "\n".join(f"- {item}" for item in default_constraints[:8])
+        ).strip()
+
+    module_outline_text = _render_module_outline(pc.get("module_outline", []))
+    target_source = _render_target_symbol(target_symbol)
+    full_file_source = str(pc.get("full_file_source", "") or "").strip()
+
+    related_tests_text, related_test_metrics = _render_related_tests(
+        pc,
+        max_items=1,
+        per_item_chars=450,
+    )
+    if related_tests_text == "none":
+        related_tests_text = ""
+
+    reference_text, reference_metrics = _render_reference_artifacts(
+        request.reference_context or {},
+        max_items=1,
+        per_item_chars=700,
+    )
+    if reference_text == "none":
+        reference_text = ""
+
+    logger.info(
+        "build_planner_user_prompt available_user_chars_type=%s default_constraints_count=%s",
+        type(available_user_chars).__name__,
+        len(default_constraints),
+    )
+
+    if isinstance(available_user_chars, int) and available_user_chars > 0:
+        if len(module_outline_text) > 700:
+            module_outline_text, _ = _truncate_text(module_outline_text, 700)
+        if len(target_source) > 1200:
+            target_source, _ = _truncate_text(target_source, 1200)
+        if len(full_file_source) > 1200:
+            full_file_source, _ = _truncate_text(full_file_source, 1200)
+        if len(related_tests_text) > 450:
+            related_tests_text, _ = _truncate_text(related_tests_text, 450)
+        if len(reference_text) > 700:
+            reference_text, _ = _truncate_text(reference_text, 700)
+
+    values = {
+        "request": compact_request_text,
+        "target_file": request.target.get("file_path", ""),
+        "target_symbol": request.target.get("qualname", ""),
+        "operation": request.target.get("operation", "replace_symbol"),
+        "insert_after": request.target.get("insert_after") or request.target.get("qualname", "") or "null",
+        "reference_symbol": "null",
+        "module_outline_block": _render_optional_block("Структура модуля", module_outline_text),
+        "target_function_block": _render_optional_block("Целевой symbol / anchor", target_source),
+        "full_file_source_block": _render_optional_block("Полный исходный текст файла", full_file_source),
+        "related_tests_block": _render_optional_block("Связанные тесты проекта", related_tests_text),
+        "reference_function_block": _render_optional_block("Reference artifacts", reference_text),
+    }
+
+    logger.info(
+        "build_planner_user_prompt template_vars=%s",
+        sorted(values.keys()),
+    )
+
+    prompt = template_text.format(**values)
+
+    prompt = template_text.format(**values)
+    metrics = {
+        "planner_prompt_chars": len(prompt),
+        "planner_request_chars": len(compact_request_text),
+        "planner_module_outline_chars": len(module_outline_text),
+        "planner_target_chars": len(target_source),
+        "planner_full_file_chars": len(full_file_source),
+        "planner_related_tests_count": int(related_test_metrics.get("related_tests_count", 0) or 0),
+        "planner_related_test_chars": int(related_test_metrics.get("related_test_chars", 0) or 0),
+        "planner_reference_count": int(reference_metrics.get("reference_count", 0) or 0),
+        "planner_reference_chars": int(reference_metrics.get("reference_chars", 0) or 0),
+        "planner_default_constraints_count": len(default_constraints),
+    }
+    return prompt, metrics
 
 def build_coder_user_prompt(
     template_text: str,
@@ -221,15 +405,25 @@ def build_coder_user_prompt(
     available_user_chars: int | None = None,
 ) -> tuple[str, dict[str, Any]]:
     pc = request.project_context or {}
-    request_mode = str(getattr(request, 'mode', 'generate') or 'generate')
-    module_outline_text = _normalize_optional_value(_render_module_outline(pc.get("module_outline", [])))
-    target_text = _render_target_symbol(pc.get("target_symbol") or pc.get("target_function") or {})
-    full_file_text = str(pc.get("full_file_source", "") or "")
+    request_mode = str(getattr(request, "mode", "generate") or "generate")
+    requested_operation = str(
+        request.target.get("operation", "replace_symbol") or "replace_symbol"
+    ).strip()
 
+    module_outline_text = _normalize_optional_value(
+        _render_module_outline(pc.get("module_outline", []))
+    )
+    target_text = _render_target_symbol(
+        pc.get("target_symbol") or pc.get("target_function") or {}
+    )
+    full_file_text = str(pc.get("full_file_source", "") or "")
     if runtime_config.coder_max_full_file_chars <= 0:
         full_file_text = ""
     else:
-        full_file_text, _ = _truncate_text(full_file_text, runtime_config.coder_max_full_file_chars)
+        full_file_text, _ = _truncate_text(
+            full_file_text,
+            runtime_config.coder_max_full_file_chars,
+        )
     full_file_text = _normalize_optional_value(full_file_text)
 
     reference_text, ref_metrics = _render_reference_artifacts(
@@ -239,10 +433,33 @@ def build_coder_user_prompt(
     )
     reference_text = _normalize_optional_value(reference_text)
 
-    related_tests_text, related_test_metrics = _render_related_tests(pc, max_items=1, per_item_chars=450)
+    related_tests_text, related_test_metrics = _render_related_tests(
+        pc,
+        max_items=1,
+        per_item_chars=450,
+    )
     related_tests_text = _normalize_optional_value(related_tests_text)
 
-    compact_request_text = _compact_change_request_for_codegen(request.change_request, planner_result)
+    compact_request_text = _compact_change_request_for_codegen(
+        request.change_request,
+        planner_result,
+    )
+
+    target_limit = int(runtime_config.coder_prompt_target_chars or 0)
+    hard_limit = int(runtime_config.coder_prompt_hard_limit or 0)
+    runtime_limit = int(available_user_chars or 0) if available_user_chars else 0
+
+    # Это не жесткий лимит, а рабочая цель.
+    # Даем небольшой люфт, потому что planner и coder могут слегка выходить за target.
+    soft_limit = target_limit + 250 if target_limit > 0 else 0
+
+    # Реальный предел, после которого уже надо агрессивно ужиматься.
+    effective_limit = runtime_limit or hard_limit or soft_limit or 0
+
+    trim_steps: list[str] = []
+
+    def _record(step: str) -> None:
+        trim_steps.append(step)
 
     def _render(
         module_outline_value: str,
@@ -252,157 +469,355 @@ def build_coder_user_prompt(
         related_tests_value: str,
         request_value: str,
     ) -> str:
-        normalized_module_outline = _normalize_optional_value(module_outline_value)
-        normalized_full_file = _normalize_optional_value(full_file_value)
-        normalized_reference = _normalize_optional_value(reference_value)
-        normalized_related_tests = _normalize_optional_value(related_tests_value)
-
-        prompt = template_text.format(
+        return template_text.format(
             operation=request.target.get("operation", "replace_symbol"),
             target_file=request.target.get("file_path", ""),
             target_symbol=request.target.get("qualname", ""),
-            insert_after=request.target.get("insert_after") or request.target.get("qualname", "") or "null",
+            insert_after=request.target.get("insert_after")
+            or request.target.get("qualname", "")
+            or "null",
             reference_symbol="null",
             planner_json=_pretty(planner_result),
             request=request_value,
-            module_outline_block=_render_optional_block("Структура модуля", normalized_module_outline),
-            target_function_block=_render_optional_block("Целевой symbol / anchor", target_value),
-            reference_function_block=_render_optional_block("Функция-образец", normalized_reference),
-            full_file_source_block=_render_optional_block("Полный исходный текст файла", normalized_full_file),
-            related_tests_block=_render_optional_block("Related tests", normalized_related_tests),
+            module_outline_block=_render_optional_block(
+                "Структура модуля",
+                _normalize_optional_value(module_outline_value),
+            ),
+            target_function_block=_render_optional_block(
+                "Целевой symbol / anchor",
+                target_value,
+            ),
+            reference_function_block=_render_optional_block(
+                "Функция-образец",
+                _normalize_optional_value(reference_value),
+            ),
+            full_file_source_block=_render_optional_block(
+                "Полный исходный текст файла",
+                _normalize_optional_value(full_file_value),
+            ),
+            related_tests_block=_render_optional_block(
+                "Related tests",
+                _normalize_optional_value(related_tests_value),
+            ),
         )
-        return prompt
 
-    def _drop_reference() -> None:
-        nonlocal reference_text, ref_metrics
-        reference_text = ""
-        ref_metrics = {
-            **ref_metrics,
-            "reference_count": 0,
-            "reference_chars": 0,
-            "reference_titles": [],
-            "reference_content_modes": [],
-        }
+    # Обязательные части
+    current_module_outline = module_outline_text
+    current_target = target_text
+    current_request = compact_request_text
 
-    def _drop_related_tests() -> None:
-        nonlocal related_tests_text, related_test_metrics
-        related_tests_text = ""
-        related_test_metrics = {
-            **related_test_metrics,
-            "related_tests_count": 0,
-            "related_test_chars": 0,
-            "related_test_qualnames": [],
-        }
+    # Опциональные части будем подключать по приоритету
+    current_full_file = ""
+    current_related_tests = ""
+    current_reference = ""
 
-    trim_steps: list[str] = []
-    def _record(step: str) -> None:
-        trim_steps.append(step)
-
-    requested_operation = str(request.target.get("operation", "replace_symbol") or "replace_symbol").strip()
-
+    # Для insert_after_symbol reference обычно наименее надежен,
+    # поэтому даем ему самый низкий приоритет.
+    # Для остальных операций тоже держим reference ниже related_tests.
     if requested_operation == "insert_after_symbol":
-        full_file_text = ""
-        _drop_reference()
-        _drop_related_tests()
-        if module_outline_text:
-            module_outline_text, _ = _truncate_text(module_outline_text, 220)
-            _record("truncated module_outline to 220 for insert_after_symbol")
-        compact_request_text, _ = _truncate_text(compact_request_text, 260)
-        _record("truncated request to 260 for insert_after_symbol")
-        
-    initial_prompt = _render(module_outline_text, target_text, full_file_text, reference_text, related_tests_text, compact_request_text)
-    before_trim = len(initial_prompt)
+        optional_blocks: list[tuple[str, str]] = [
+            ("module_outline", current_module_outline),
+            ("related_tests", related_tests_text),
+            ("full_file", full_file_text),
+            ("reference", reference_text),
+        ]
+    else:
+        optional_blocks = [
+            ("module_outline", current_module_outline),
+            ("full_file", full_file_text),
+            ("related_tests", related_tests_text),
+            ("reference", reference_text),
+        ]
 
-    if len(initial_prompt) > runtime_config.coder_prompt_target_chars and full_file_text:
-        full_file_text = ""
-        _record("removed full_file_source on soft target limit")
-    prompt = _render(module_outline_text, target_text, full_file_text, reference_text, related_tests_text, compact_request_text)
+    # Сначала базовый prompt без опциональных тяжелых блоков
+    prompt = _render(
+        current_module_outline,
+        current_target,
+        current_full_file,
+        current_reference,
+        current_related_tests,
+        current_request,
+    )
+    before_trim = len(prompt)
 
-    if len(prompt) > runtime_config.coder_prompt_target_chars and request_mode == "generate" and related_tests_text != "none":
-        _drop_related_tests(); _record("removed related_tests on soft target limit for generate")
-        prompt = _render(module_outline_text, target_text, full_file_text, reference_text, related_tests_text, compact_request_text)
-    if len(prompt) > runtime_config.coder_prompt_target_chars and request_mode != "generate" and reference_text != "none":
-        _drop_reference(); _record("removed reference on soft target limit for non-generate")
-        prompt = _render(module_outline_text, target_text, full_file_text, reference_text, related_tests_text, compact_request_text)
-    if len(prompt) > runtime_config.coder_prompt_target_chars and request_mode != "generate" and related_tests_text != "none":
-        _drop_related_tests(); _record("removed related_tests on soft target limit for non-generate")
-        prompt = _render(module_outline_text, target_text, full_file_text, reference_text, related_tests_text, compact_request_text)
-    if len(prompt) > runtime_config.coder_prompt_target_chars:
-        module_outline_text, _ = _truncate_text(module_outline_text, 400); _record("truncated module_outline to 400 on soft target limit")
-        prompt = _render(module_outline_text, target_text, full_file_text, reference_text, related_tests_text, compact_request_text)
-    if len(prompt) > runtime_config.coder_prompt_hard_limit:
-        target_text, _ = _truncate_text(target_text, max(220, runtime_config.coder_prompt_hard_limit // 4)); _record("truncated target on hard limit")
-        prompt = _render(module_outline_text, target_text, full_file_text, reference_text, related_tests_text, compact_request_text)
-    if len(prompt) > runtime_config.coder_prompt_hard_limit and request_mode == "generate" and related_tests_text != "none":
-        _drop_related_tests(); _record("removed related_tests on hard limit for generate")
-        prompt = _render(module_outline_text, target_text, full_file_text, reference_text, related_tests_text, compact_request_text)
-    if len(prompt) > runtime_config.coder_prompt_hard_limit and reference_text != "none":
-        _drop_reference(); _record("removed reference on hard limit")
-        prompt = _render(module_outline_text, target_text, full_file_text, reference_text, related_tests_text, compact_request_text)
+    # Если уже слишком длинно, сначала слегка ужимаем request/target/outline
+    if soft_limit and len(prompt) > soft_limit:
+        current_request, _ = _truncate_text(current_request, 260)
+        _record("truncated request to 260 in base prompt")
+        prompt = _render(
+            current_module_outline,
+            current_target,
+            current_full_file,
+            current_reference,
+            current_related_tests,
+            current_request,
+        )
 
-    runtime_limit = available_user_chars or runtime_config.coder_prompt_hard_limit
-    if len(prompt) > runtime_limit and request_mode == "generate" and related_tests_text != "none":
-        _drop_related_tests(); _record("removed related_tests on runtime limit for generate")
-        prompt = _render(module_outline_text, target_text, full_file_text, reference_text, related_tests_text, compact_request_text)
-    if len(prompt) > runtime_limit and request_mode != "generate" and reference_text != "none":
-        _drop_reference(); _record("removed reference on runtime limit for non-generate")
-        prompt = _render(module_outline_text, target_text, full_file_text, reference_text, related_tests_text, compact_request_text)
-    if len(prompt) > runtime_limit:
-        compact_request_text, _ = _truncate_text(compact_request_text, max(220, runtime_limit // 5)); _record("truncated request on runtime limit")
-        prompt = _render(module_outline_text, target_text, full_file_text, reference_text, related_tests_text, compact_request_text)
-    if len(prompt) > runtime_limit:
-        target_text, _ = _truncate_text(target_text, max(220, runtime_limit // 4)); _record("truncated target on runtime limit")
-        prompt = _render(module_outline_text, target_text, full_file_text, reference_text, related_tests_text, compact_request_text)
-    if len(prompt) > runtime_limit and module_outline_text != "[]":
-        module_outline_text, _ = _truncate_text(module_outline_text, 120); _record("truncated module_outline to 120 on runtime limit")
-        prompt = _render(module_outline_text, target_text, full_file_text, reference_text, related_tests_text, compact_request_text)
-    if len(prompt) > runtime_limit and related_tests_text != "none":
-        related_tests_text, _ = _truncate_text(related_tests_text, max(180, runtime_limit // 10)); _record("truncated related_tests on runtime limit")
-        prompt = _render(module_outline_text, target_text, full_file_text, reference_text, related_tests_text, compact_request_text)
-    if len(prompt) > runtime_limit and reference_text != "none":
-        _drop_reference(); _record("removed reference on late runtime limit")
-        prompt = _render(module_outline_text, target_text, full_file_text, reference_text, related_tests_text, compact_request_text)
-    if len(prompt) > runtime_limit:
-        compact_request_text, _ = _truncate_text(compact_request_text, 160); _record("truncated request to 160 on late runtime limit")
-        prompt = _render(module_outline_text, target_text, full_file_text, reference_text, related_tests_text, compact_request_text)
-    if len(prompt) > runtime_limit:
-        target_text, _ = _truncate_text(target_text, 160); _record("truncated target to 160 on late runtime limit")
-        prompt = _render(module_outline_text, target_text, full_file_text, reference_text, related_tests_text, compact_request_text)
+    if soft_limit and len(prompt) > soft_limit and current_target:
+        current_target, _ = _truncate_text(current_target, 500)
+        _record("truncated target to 500 in base prompt")
+        prompt = _render(
+            current_module_outline,
+            current_target,
+            current_full_file,
+            current_reference,
+            current_related_tests,
+            current_request,
+        )
 
-    metrics = _build_coder_prompt_metrics(prompt, target_text, module_outline_text, full_file_text, reference_text, related_tests_text, before_trim, len(prompt), trim_steps)
+    if soft_limit and len(prompt) > soft_limit and current_module_outline:
+        current_module_outline, _ = _truncate_text(current_module_outline, 220)
+        _record("truncated module_outline to 220 in base prompt")
+        prompt = _render(
+            current_module_outline,
+            current_target,
+            current_full_file,
+            current_reference,
+            current_related_tests,
+            current_request,
+        )
+
+    # Теперь последовательно пытаемся добавить блоки по приоритету.
+    for block_name, block_value in optional_blocks:
+        block_text = _normalize_optional_value(block_value)
+        if not block_text:
+            continue
+
+        prev_full_file = current_full_file
+        prev_related_tests = current_related_tests
+        prev_reference = current_reference
+        prev_module_outline = current_module_outline
+
+        if block_name == "full_file":
+            current_full_file = block_text
+        elif block_name == "related_tests":
+            current_related_tests = block_text
+        elif block_name == "reference":
+            current_reference = block_text
+        elif block_name == "module_outline":
+            current_module_outline = block_text
+
+        candidate_prompt = _render(
+            current_module_outline,
+            current_target,
+            current_full_file,
+            current_reference,
+            current_related_tests,
+            current_request,
+        )
+
+        # Если вылезли слишком далеко за рабочую цель — откатываем этот блок.
+        if soft_limit and len(candidate_prompt) > soft_limit:
+            current_full_file = prev_full_file
+            current_related_tests = prev_related_tests
+            current_reference = prev_reference
+            current_module_outline = prev_module_outline
+            _record(f"skipped {block_name} due to soft size target")
+            continue
+
+        prompt = candidate_prompt
+        _record(f"kept {block_name}")
+
+    # Финальная простая стадия дожатия.
+    # Не делаем сложный каскад, а идем по понятному порядку.
+    if effective_limit and len(prompt) > effective_limit and current_reference:
+        current_reference = ""
+        _record("removed reference on effective limit")
+        prompt = _render(
+            current_module_outline,
+            current_target,
+            current_full_file,
+            current_reference,
+            current_related_tests,
+            current_request,
+        )
+
+    if effective_limit and len(prompt) > effective_limit and current_full_file:
+        current_full_file, _ = _truncate_text(current_full_file, 220)
+        _record("truncated full_file to 220 on effective limit")
+        prompt = _render(
+            current_module_outline,
+            current_target,
+            current_full_file,
+            current_reference,
+            current_related_tests,
+            current_request,
+        )
+
+    if effective_limit and len(prompt) > effective_limit and current_related_tests:
+        current_related_tests, _ = _truncate_text(current_related_tests, 180)
+        _record("truncated related_tests to 180 on effective limit")
+        prompt = _render(
+            current_module_outline,
+            current_target,
+            current_full_file,
+            current_reference,
+            current_related_tests,
+            current_request,
+        )
+
+    if effective_limit and len(prompt) > effective_limit and current_full_file:
+        current_full_file = ""
+        _record("removed full_file on hard overflow")
+        prompt = _render(
+            current_module_outline,
+            current_target,
+            current_full_file,
+            current_reference,
+            current_related_tests,
+            current_request,
+        )
+
+    if effective_limit and len(prompt) > effective_limit and current_related_tests:
+        current_related_tests = ""
+        _record("removed related_tests on hard overflow")
+        prompt = _render(
+            current_module_outline,
+            current_target,
+            current_full_file,
+            current_reference,
+            current_related_tests,
+            current_request,
+        )
+
+    if effective_limit and len(prompt) > effective_limit and current_module_outline:
+        current_module_outline, _ = _truncate_text(current_module_outline, 120)
+        _record("truncated module_outline to 120 on hard overflow")
+        prompt = _render(
+            current_module_outline,
+            current_target,
+            current_full_file,
+            current_reference,
+            current_related_tests,
+            current_request,
+        )
+
+    if effective_limit and len(prompt) > effective_limit and current_request:
+        current_request, _ = _truncate_text(current_request, 160)
+        _record("truncated request to 160 on hard overflow")
+        prompt = _render(
+            current_module_outline,
+            current_target,
+            current_full_file,
+            current_reference,
+            current_related_tests,
+            current_request,
+        )
+
+    if effective_limit and len(prompt) > effective_limit and current_target:
+        current_target, _ = _truncate_text(current_target, 160)
+        _record("truncated target to 160 on hard overflow")
+        prompt = _render(
+            current_module_outline,
+            current_target,
+            current_full_file,
+            current_reference,
+            current_related_tests,
+            current_request,
+        )
+
+    metrics = _build_coder_prompt_metrics(
+        prompt,
+        current_target,
+        current_module_outline,
+        current_full_file,
+        current_reference,
+        current_related_tests,
+        before_trim,
+        len(prompt),
+        trim_steps,
+    )
     metrics.update(ref_metrics)
     metrics.update(related_test_metrics)
+
+    logger.info(
+        "coder prompt priority assembly request_id=%s operation=%s soft_limit=%s effective_limit=%s final_chars=%s trim_steps=%s",
+        request.request_id,
+        requested_operation,
+        soft_limit,
+        effective_limit,
+        len(prompt),
+        trim_steps,
+    )
+
     return prompt, metrics
 
 
-def _build_reference_context_block(reference_context: dict[str, Any], runtime_config: RuntimeConfig | None) -> str:
-    max_chars = runtime_config.repair_max_reference_chars if runtime_config else 420
+def _build_reference_context_block(
+    reference_context: dict[str, Any],
+    runtime_config: RuntimeConfig | None,
+) -> str:
+    max_chars = runtime_config.repair_max_reference_chars if runtime_config else 220
     artifacts = list(reference_context.get("reference_artifacts") or [])[:1]
-    compact_reference = {
-        "reference_artifacts": [
+
+    compact_items: list[dict[str, Any]] = []
+    for item in artifacts:
+        raw_content = str(item.get("content", "") or "")
+        truncated_content, _ = _truncate_text(raw_content, max_chars)
+        compact_items.append(
             {
                 "title": item.get("title", ""),
                 "usage_mode": item.get("usage_mode", ""),
                 "content_mode": item.get("content_mode", ""),
-                "content": _truncate_text(str(item.get("content", "") or ""), max_chars)[0],
+                "content": truncated_content,
             }
-            for item in artifacts
-        ],
-    }
-    return _pretty(compact_reference)
+        )
+
+    if not compact_items:
+        return ""
+
+    return _render_optional_block(
+        "Справочный контекст",
+        _pretty({"reference_artifacts": compact_items}),
+    )
 
 
-def _build_repair_extra_blocks(change_request_text: str, constraints: list[str], reference_context_text: str) -> dict[str, str]:
-    return {
-        "change_request_preserve_block": f"\n\nЗапрос, который нужно сохранить:\n{change_request_text or 'repair request'}",
-        "constraints_preserve_block": f"\n\nОграничения:\n{_render_constraints_block(constraints)}",
-        "repair_instruction_block": (
-            "\n\nИнструкция на исправление:\n"
-            "Сделай код валидным и сохрани запрошенное изменение. Не возвращай исходную реализацию и не ослабляй требуемое поведение."
-        ),
-        "reference_context_block": f"\n\nСправочный контекст:\n{reference_context_text}",
-    }
+def _build_repair_previous_code_block(
+    previous_artifact: dict[str, Any],
+) -> str:
+    code = str(previous_artifact.get("code", "") or "").strip()
+    return _render_optional_block("Код, который нужно исправить", code)
 
+def _build_repair_syntax_error_block(
+    error_context: dict[str, Any],
+) -> str:
+    verification_summary = (error_context or {}).get("verification_summary") or {}
+    failed_blocks = verification_summary.get("failed_blocks") or []
+
+    for block in failed_blocks:
+        issues = block.get("issues") or []
+        details = block.get("details") or {}
+
+        for issue in issues:
+            code = str(issue.get("code", "") or "")
+            message = str(issue.get("message", "") or "")
+            if code == "SyntaxError" or "syntax" in code.lower():
+                return _render_optional_block(
+                    "Локальная синтаксическая диагностика",
+                    _pretty(
+                        {
+                            "code": code,
+                            "message": message,
+                            "details": details,
+                        }
+                    ),
+                )
+
+        error_type = str(details.get("error_type", "") or "")
+        message = str(details.get("message", "") or "")
+        if error_type == "SyntaxError" or "syntax" in error_type.lower():
+            return _render_optional_block(
+                "Локальная синтаксическая диагностика",
+                _pretty(
+                    {
+                        "code": error_type or "SyntaxError",
+                        "message": message,
+                        "details": details,
+                    }
+                ),
+            )
+
+    return ""
 
 def _render_optional_block(title: str, value: str) -> str:
     text = str(value or "").strip()
@@ -416,6 +831,7 @@ def _normalize_optional_value(value: str | None) -> str:
         return ""
     return text
 
+
 def build_repair_user_prompt(
     template_text: str,
     request: RepairRequest,
@@ -423,56 +839,123 @@ def build_repair_user_prompt(
 ) -> str:
     project_context = request.project_context or {}
     target_symbol = project_context.get("target_symbol") or {}
-    module_outline_text = _render_module_outline(project_context.get("module_outline", []))
+    previous_artifact = request.previous_artifact or {}
+    change_request = request.change_request or {}
+
+    requested_operation = previous_artifact.get("operation") or "replace_symbol"
+    hard_limit = int(runtime_config.repair_prompt_hard_limit or 0) if runtime_config else 0
+
+    module_outline_text = _normalize_optional_value(
+        _render_module_outline(project_context.get("module_outline", []))
+    )
+    if module_outline_text:
+        module_outline_text, _ = _truncate_text(module_outline_text, 220)
+        module_outline_text = _normalize_optional_value(module_outline_text)
+
     full_file_source = str(project_context.get("full_file_source", "") or "")
     if runtime_config and runtime_config.coder_max_full_file_chars <= 0:
         full_file_source = ""
     elif full_file_source:
-        full_file_source, _ = _truncate_text(full_file_source, 700)
+        full_file_source, _ = _truncate_text(full_file_source, 350)
+    full_file_source = _normalize_optional_value(full_file_source)
 
-    change_request = request.change_request or {}
-    change_request_text = _compact_change_request_for_codegen(change_request, None)
-    constraints = [str(item) for item in (change_request.get("constraints") or []) if item]
     target_rendered = _render_target_symbol(target_symbol)
-    target_rendered, _ = _truncate_text(target_rendered, 900)
-    previous_code = str(request.previous_artifact.get("code", "") or "")
-    previous_code, _ = _truncate_text(previous_code, 1200)
-    reference_context_text = _build_reference_context_block(request.reference_context or {}, runtime_config)
-    extra_blocks = _build_repair_extra_blocks(change_request_text, constraints, reference_context_text)
+    if target_rendered:
+        target_rendered, _ = _truncate_text(target_rendered, 420)
+    target_rendered = _normalize_optional_value(target_rendered)
 
-    requested_operation = (
-        request.previous_artifact.get("operation")
-        or "replace_symbol"
+    previous_code = str(previous_artifact.get("code", "") or "")
+    if previous_code:
+        previous_code, _ = _truncate_text(previous_code, 700)
+    previous_code = _normalize_optional_value(previous_code)
+
+    reference_context_block = _build_reference_context_block(
+        request.reference_context or {},
+        runtime_config,
     )
-    values = {
-        "operation": request.previous_artifact.get("operation", "replace_symbol"),
-        "target_file": request.previous_artifact.get("target_file", ""),
-        "target_symbol": request.previous_artifact.get("target_qualname", request.previous_artifact.get("target_symbol", "")),
-        "insert_after": request.previous_artifact.get("insert_after") or "null",
-        "request": change_request_text or "repair request",
-        "planner_json": _pretty({"repair_for": request.previous_generation_request_id, "change_request": change_request}),
-        "verification_summary": _pretty(request.error_context),
-        "verification_summary_json": _pretty(request.error_context),
-        "module_outline": module_outline_text,
-        "target_function": target_rendered,
-        "full_file_source": full_file_source,
-        "current_generated_code": previous_code,
-        "module_outline_block": _render_optional_block("Module outline", module_outline_text),
-        "target_function_block": _render_optional_block("Target function", target_rendered),
-        "reference_function_block": "",
-        "full_file_source_block": _render_optional_block("Full file source", full_file_source),
-        "requested_operation": requested_operation,
-        **extra_blocks,
-    }
-    prompt = template_text.format(**values)
+    syntax_error_block = _build_repair_syntax_error_block(
+        request.error_context or {},
+    )
+# ***********************
+    has_local_syntax_error = bool(syntax_error_block)
+    has_previous_code = bool(previous_code)
+# ***********************
+    if has_local_syntax_error and has_previous_code:
+        module_outline_text = ""
 
-    if runtime_config and len(prompt) > runtime_config.repair_prompt_hard_limit:
-        values["reference_context_block"] = "\n\nСправочный контекст:\n" + _pretty({"reference_artifacts": []})
-        prompt = template_text.format(**values)
-    if runtime_config and len(prompt) > runtime_config.repair_prompt_hard_limit:
+    values = {
+        "requested_operation": requested_operation,
+        "target_file": previous_artifact.get("target_file", ""),
+        "target_symbol": previous_artifact.get(
+            "target_qualname",
+            previous_artifact.get("target_symbol", ""),
+        ),
+        "insert_after": previous_artifact.get("insert_after") or "null",
+        "request": _compact_change_request_for_codegen(change_request, None) or "repair request",
+        "syntax_error_block": syntax_error_block,
+        "previous_code_block": _render_optional_block(
+            "Код, который нужно исправить",
+            previous_code,
+        ),
+        "target_function_block": _render_optional_block(
+            "Исходный target symbol",
+            target_rendered,
+        ),
+        "module_outline_block": _render_optional_block(
+            "Структура модуля",
+            module_outline_text,
+        ),
+        "full_file_source_block": _render_optional_block(
+            "Полный исходный текст файла",
+            full_file_source,
+        ),
+        "reference_context_block": reference_context_block,
+    }
+
+    prompt = template_text.format(**values)
+    trim_steps: list[str] = []
+
+    def _rerender() -> str:
+        return template_text.format(**values)
+
+    if hard_limit and len(prompt) > hard_limit and values["reference_context_block"]:
+        values["reference_context_block"] = ""
+        trim_steps.append("removed reference_context_block")
+        prompt = _rerender()
+
+    if hard_limit and len(prompt) > hard_limit and values["module_outline_block"]:
         values["module_outline_block"] = ""
+        trim_steps.append("removed module_outline_block")
+        prompt = _rerender()
+
+    if hard_limit and len(prompt) > hard_limit and values["full_file_source_block"]:
         values["full_file_source_block"] = ""
-        prompt = template_text.format(**values)
+        trim_steps.append("removed full_file_source_block")
+        prompt = _rerender()
+
+    if hard_limit and len(prompt) > hard_limit and previous_code:
+        compact_previous_code, _ = _truncate_text(previous_code, 450)
+        values["previous_code_block"] = _render_optional_block(
+            "Код, который нужно исправить",
+            compact_previous_code,
+        )
+        trim_steps.append("truncated previous_code_block to 450")
+        prompt = _rerender()
+
+    logger.info(
+        "repair prompt assembly request_id=%s hard_limit=%s final_chars=%s trim_steps=%s "
+        "has_previous_code=%s has_target=%s has_module_outline=%s has_full_file=%s has_reference=%s",
+        request.request_id,
+        hard_limit,
+        len(prompt),
+        trim_steps,
+        bool(values["previous_code_block"]),
+        bool(values["target_function_block"]),
+        bool(values["module_outline_block"]),
+        bool(values["full_file_source_block"]),
+        bool(values["reference_context_block"]),
+    )
+
     return prompt
 
 
@@ -518,10 +1001,23 @@ def _extract_declared_symbol_name(code: str) -> str | None:
 
     return None
 
+def _normalize_generated_code_artifact(
+    generated_code_artifact: Any,
+) -> dict[str, Any]:
+    if isinstance(generated_code_artifact, dict):
+        return generated_code_artifact
+
+    if isinstance(generated_code_artifact, list):
+        for item in generated_code_artifact:
+            if isinstance(item, dict):
+                return item
+        return {}
+
+    return {}
 
 def _resolve_test_target_symbol(
     request: GenerationRequest,
-    generated_code_artifact: dict[str, Any] | None = None,
+    generated_code_artifact: Any = None,
 ) -> tuple[str, str | None]:
     requested_operation = (
         str(request.target.get("operation", "") or "").strip()
@@ -533,9 +1029,8 @@ def _resolve_test_target_symbol(
     if requested_operation != "insert_after_symbol":
         return anchor_symbol, None
 
-    generated_code = ""
-    if generated_code_artifact:
-        generated_code = str(generated_code_artifact.get("code", "") or "")
+    artifact_payload = _normalize_generated_code_artifact(generated_code_artifact)
+    generated_code = str(artifact_payload.get("code", "") or "")
 
     generated_symbol_name = _extract_declared_symbol_name(generated_code)
     if not generated_symbol_name:
@@ -544,7 +1039,11 @@ def _resolve_test_target_symbol(
     target_file = str(request.target.get("file_path", "") or "").strip()
     module_name = target_file[:-3].replace("/", ".") if target_file.endswith(".py") else ""
 
-    effective_symbol = f"{module_name}.{generated_symbol_name}" if module_name else generated_symbol_name
+    effective_symbol = (
+        f"{module_name}.{generated_symbol_name}"
+        if module_name
+        else generated_symbol_name
+    )
     return effective_symbol, anchor_symbol or None
 
 def _build_test_prompt_values(
@@ -562,6 +1061,7 @@ def _build_test_prompt_values(
     effective_target_kind: str,
     effective_target_name: str,
     anchor_symbol: str | None,
+    test_plan_text: str,    
 ) -> dict[str, str]:
     target_block = _render_optional_block("Сгенерированный target-код", target_source)
     example_block = _render_optional_block("Пример теста", example_text)
@@ -575,7 +1075,10 @@ def _build_test_prompt_values(
         "Полный исходный текст целевого файла",
         full_file_source_text,
     )
-
+    test_plan_block = _render_optional_block(
+        "План теста",
+        test_plan_text,
+    )
     return {
         "operation": request.target.get("operation", "replace_symbol"),
         "target_file": request.target.get("file_path", ""),
@@ -601,6 +1104,7 @@ def _build_test_prompt_values(
         "related_tests_block": related_tests_block,
         "import_context_block": import_context_block,
         "inferred_symbols_block": inferred_symbols_block,
+        "test_plan_block": test_plan_block,
     }
 
 def _log_test_prompt_state(
@@ -645,9 +1149,12 @@ def build_test_generator_user_prompt(
     example_test_source: str,
     runtime_config: RuntimeConfig,
     available_user_chars: int,
-    generated_code_artifact: dict[str, Any] | None = None,
+    generated_code_artifact: Any = None,
+    test_plan: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     pc = request.project_context or {}
+    effective_test_plan = test_plan or request.test_plan or {}
+    test_plan_text = _pretty(effective_test_plan) if effective_test_plan else ""    
     target_symbol = pc.get("target_symbol") or {}
     compact_request_text = _compact_change_request_for_codegen(
         request.change_request,
@@ -657,10 +1164,10 @@ def build_test_generator_user_prompt(
         request,
         generated_code_artifact=generated_code_artifact,
     )
-
+    artifact_payload = _normalize_generated_code_artifact(generated_code_artifact)
     effective_target_kind = "function"
-    if generated_code_artifact and generated_code_artifact.get("code"):
-        target_source = str(generated_code_artifact.get("code", "")).strip()
+    if artifact_payload.get("code"):
+        target_source = str(artifact_payload.get("code", "")).strip()
         target_source_origin = "generated_code_artifact"
     else:
         target_source = str(target_symbol.get("source", "") or "").strip()
@@ -776,6 +1283,7 @@ def build_test_generator_user_prompt(
             effective_target_kind=effective_target_kind,
             effective_target_name=effective_target_name,
             anchor_symbol=anchor_symbol,
+            test_plan_text=test_plan_text,            
         )
         return template_text.format(**values)
 

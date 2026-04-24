@@ -17,6 +17,7 @@ DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.yaml"
 @dataclass(slots=True)
 class OllamaSettings:
     base_url: str
+    api_key: str | None
     timeout_sec: int
     think: bool | None
     temperature: float
@@ -42,6 +43,7 @@ class PromptSettings:
     repair_user_template: str
     test_generator_user_template: str
     test_generator_example: str
+    test_planner_user_template: str
 
 
 @dataclass(slots=True)
@@ -211,6 +213,9 @@ def load_config(config_path: str | Path | None = None) -> RuntimeConfig:
     data = _merge_config(path)
     llm = data.get('llm') or {}
     oll = llm.get('ollama') or {}
+    ollama_api_key = oll.get('api_key', os.environ.get('OLLAMA_API_KEY'))
+    if ollama_api_key is not None:
+        ollama_api_key = str(ollama_api_key).strip() or None
     cg = data.get('codegenerator') or {}
     prompts_cfg = cg.get('prompts') or {}
     models_cfg = cg.get('models') or {}
@@ -223,6 +228,7 @@ def load_config(config_path: str | Path | None = None) -> RuntimeConfig:
     return RuntimeConfig(
         ollama=OllamaSettings(
             base_url=str(oll.get('base_url', '')).strip(),
+            api_key=ollama_api_key,
             timeout_sec=int(oll.get('timeout_sec', 420)),
             think=oll.get('think', False),
             temperature=float(oll.get('temperature', 0.0)),
@@ -237,7 +243,7 @@ def load_config(config_path: str | Path | None = None) -> RuntimeConfig:
             test_generator_model=str(models_cfg.get('test_generator_model', 'qwen2.5-coder:7b-instruct')),
             repair_model=str(models_cfg.get('repair_model', models_cfg.get('coder_model', 'qwen2.5-coder:14b-instruct-q4_K_M'))),
         ),
-        prompts=PromptSettings(**{key: str(prompts_cfg.get(key, '')) for key in ['system_rules', 'planner_user_template', 'coder_user_template', 'repair_user_template', 'test_generator_user_template', 'test_generator_example']}),
+        prompts=PromptSettings(**{key: str(prompts_cfg.get(key, '')) for key in ['system_rules', 'planner_user_template', 'coder_user_template', 'repair_user_template', 'test_generator_user_template', 'test_generator_example', 'test_planner_user_template']}),
         defaults_constraints=[str(item) for item in defaults_cfg.get('constraints', [])],
         repair_enabled=bool(generation_cfg.get('repair_enabled', True)),
         max_repair_attempts=int(generation_cfg.get('max_repair_attempts', 1)),
