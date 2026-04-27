@@ -123,6 +123,10 @@ class RuntimeConfig:
     coder_max_full_file_chars: int
     repair_prompt_hard_limit: int
     repair_max_reference_chars: int
+
+    test_prompt_related_tests_truncate_chars: int
+    test_prompt_full_file_truncate_chars: int
+    test_prompt_target_truncate_chars: int    
     trace: TraceSettings
     prompt_budget: PromptBudgetSettings
     budget_strategy: BudgetStrategySettings
@@ -256,6 +260,11 @@ def load_config(config_path: str | Path | None = None) -> RuntimeConfig:
         coder_max_full_file_chars=int(generation_cfg.get('coder_max_full_file_chars', 0)),
         repair_prompt_hard_limit=int(generation_cfg.get('repair_prompt_hard_limit', 5750)),
         repair_max_reference_chars=int(generation_cfg.get('repair_max_reference_chars', 420)),
+
+        test_prompt_related_tests_truncate_chars=int(generation_cfg.get('test_prompt_related_tests_truncate_chars', 160)),
+        test_prompt_full_file_truncate_chars=int(generation_cfg.get('test_prompt_full_file_truncate_chars', 260)),
+        test_prompt_target_truncate_chars=int(generation_cfg.get('test_prompt_target_truncate_chars', 220)),
+
         trace=TraceSettings(
             save_to_file=bool(trace_cfg.get('save_to_file', True)),
             show_prompts=bool(trace_cfg.get('show_prompts', True)),

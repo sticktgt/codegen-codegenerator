@@ -1326,12 +1326,6 @@ def build_test_generator_user_prompt(
         prompt = _render_prompt()
         _log("after_remove_inferred_symbols", prompt)
 
-    if len(prompt) > available_user_chars and import_context_text:
-        import_context_text = ""
-        _record("removed import_context on size limit")
-        prompt = _render_prompt()
-        _log("after_remove_import_context", prompt)
-
     if len(prompt) > available_user_chars and compact_request_text:
         compact_request_text = ""
         _record("removed compact_request_text on size limit")
@@ -1340,25 +1334,44 @@ def build_test_generator_user_prompt(
 
     # Одна простая попытка ужать related tests, не вводя многоступенчатую схему.
     if len(prompt) > available_user_chars and related_tests_text:
-        _truncate_related_tests_once(120, "truncated related_tests once to 120 on size limit")
+        _truncate_related_tests_once(
+            runtime_config.test_prompt_related_tests_truncate_chars,
+            f"truncated related_tests once to {runtime_config.test_prompt_related_tests_truncate_chars} on size limit",
+        )
         prompt = _render_prompt()
         _log("after_truncate_related_tests_once", prompt)
 
     # Одна простая попытка ужать full file, а не выбрасывать его сразу.
     if len(prompt) > available_user_chars and full_file_source_text:
-        _truncate_full_file_once(220, "truncated full_file_source once to 220 on size limit")
+        _truncate_full_file_once(
+            runtime_config.test_prompt_full_file_truncate_chars,
+            f"truncated full_file_source once to {runtime_config.test_prompt_full_file_truncate_chars} on size limit",
+        )
         prompt = _render_prompt()
         _log("after_truncate_full_file_once", prompt)
 
     if len(prompt) > available_user_chars and target_source:
-        target_source, _ = _truncate_text(target_source, 180)
-        _record("truncated target_source to 180 on size limit")
+        target_source, _ = _truncate_text(
+            target_source,
+            runtime_config.test_prompt_target_truncate_chars,
+        )
+        _record(
+            f"truncated target_source to {runtime_config.test_prompt_target_truncate_chars} on size limit"
+        )
         prompt = _render_prompt()
         _log("after_truncate_target", prompt)
 
-    # Full file убираем раньше related tests:
-    # related tests для тестогенерации обычно ценнее, потому что показывают
-    # реальный паттерн создания и использования project objects.
+    if len(prompt) > available_user_chars and import_context_text:
+        import_context_text = ""
+        _record("removed import_context on size limit")
+        prompt = _render_prompt()
+        _log("after_remove_import_context", prompt)
+
+# Full file убираем раньше related tests:
+# related tests для тестогенерации обычно ценнее, потому что показывают
+# реальный паттерн создания и использования project objects.
+# import_context тоже стараемся держать дольше, потому что он помогает
+# использовать реальные import path и не придумывать отсутствующие модули.
     if not _fits_with_soft_overflow(prompt) and full_file_source_text:
         full_file_source_text = ""
         _record("removed full_file_source context on hard size overflow")
@@ -1370,6 +1383,12 @@ def build_test_generator_user_prompt(
         _clear_related_tests("removed related_tests on hard size overflow")
         prompt = _render_prompt()
         _log("after_remove_related_tests", prompt)
+
+    if not _fits_with_soft_overflow(prompt) and import_context_text:
+        import_context_text = ""
+        _record("removed import_context on hard size overflow")
+        prompt = _render_prompt()
+        _log("after_remove_import_context_hard", prompt)        
 
     if not full_file_source_text.strip() and not str(related_tests_text or "").strip():
         logger.warning(

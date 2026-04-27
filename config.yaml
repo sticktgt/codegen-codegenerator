@@ -1,13 +1,13 @@
 llm:
   provider: "ollama"
   ollama:
-    base_url: "http://192.168.50.165:18081" # "https://ollama.com" 
-    api_key: "" # "216e6158b5814e248dcb998a99d08e35.1bsbhaxOsnSUguqLphUFB3oa"
+    base_url: "https://ollama.com" # "http://192.168.50.165:18081" #  
+    api_key: "216e6158b5814e248dcb998a99d08e35.1bsbhaxOsnSUguqLphUFB3oa"
     timeout_sec: 420 # 600
     think: false
     temperature: 0.0
-    num_ctx: 4096 # 32768
-    num_predict: 600 # 1200
+    num_ctx: 16384 # 4096 # 32768
+    num_predict: 900 # 600 # 1200
     keep_alive: 0
     options: {}
     #   num_thread: 6
@@ -25,23 +25,27 @@ codegenerator:
     test_planner_user_template: "prompts/test_planner_user_template.txt"
 
   models:
-    planner_model: "qwen3:14b-q4_K_M" # "gemma4:31b" 
-    coder_model: "qwen2.5-coder:14b-instruct-q4_K_M" # "devstral-small-2:24b" 
-    test_generator_model: "qwen2.5-coder:7b-instruct" # "devstral-small-2:24b" 
-    repair_model: "qwen2.5-coder:14b-instruct-q4_K_M" # "devstral-small-2:24b" #
+    planner_model: "qwen3-coder-next" # "qwen3-coder-next" # "qwen3:14b-q4_K_M" # "gemma4:31b" 
+    coder_model: "qwen3-coder-next" # "qwen2.5-coder:14b-instruct-q4_K_M" # "devstral-small-2:24b" 
+    test_generator_model: "qwen3-coder-next" # "qwen2.5-coder:7b-instruct" # "devstral-small-2:24b" 
+    repair_model: "qwen3-coder-next" # "qwen2.5-coder:14b-instruct-q4_K_M" # "devstral-small-2:24b" #
 
   generation:
     repair_enabled: true
     max_repair_attempts: 1
     test_generation_mode: "always"
     test_generator_max_example_tests: 1
-    coder_prompt_target_chars: 5000
-    coder_prompt_hard_limit: 5400
+    coder_prompt_target_chars: 9000 # 5000
+    coder_prompt_hard_limit: 9000 # 5400
     coder_max_reference_artifacts: 1
-    coder_max_reference_chars: 1100
-    coder_max_full_file_chars: 0
-    repair_prompt_hard_limit: 5750
-    repair_max_reference_chars: 420
+    coder_max_reference_chars: 1400 # 1100
+    coder_max_full_file_chars: 900 # 0
+    repair_prompt_hard_limit: 9000
+    repair_max_reference_chars: 700 # 420
+
+    test_prompt_related_tests_truncate_chars: 320
+    test_prompt_full_file_truncate_chars: 380
+    test_prompt_target_truncate_chars: 300
 
   defaults:
     constraints:
@@ -57,8 +61,8 @@ codegenerator:
     output_dir: "runs"
 
   prompt_budget:
-    generate_chars_limit: 5600
-    generate_test_chars_limit: 5400
-    repair_chars_limit: 5600
+    generate_chars_limit: 9000
+    generate_test_chars_limit: 9000
+    repair_chars_limit: 9000
     min_user_prompt_chars: 400
     user_prompt_reserve_chars: 100
