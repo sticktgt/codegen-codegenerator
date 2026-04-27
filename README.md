@@ -1,252 +1,252 @@
 # codegenerator
 
-`codegenerator` — отдельный проект для генерации production-кода, генерации тестов и точечного `repair` по уже подготовленному структурированному request.
+`codegenerator` — внешний генератор для `codecollector`, который принимает структурированный request, собирает prompt, вызывает локальную модель через Ollama и возвращает нормализованный результат генерации кода, теста или repair.
 
-Проект используется как внешний генератор артефактов. Он получает request в JSON или YAML, строит prompt для локальной LLM, вызывает модель через Ollama, разбирает ответ, нормализует результат и возвращает его в машиночитаемом виде.
-
-Текущая реализация ориентирована прежде всего на Python и на работу с ограниченным context budget.
+Проект не индексирует кодовую базу и не выбирает target самостоятельно. Его задача — корректно отработать уже подготовленный request и вернуть стабильный машиночитаемый результат.
 
 ---
 
 ## Назначение проекта
 
-`codegenerator` нужен как отдельный слой генерации, отделенный от orchestration и индексации.
+`codegenerator` нужен как отдельный слой генерации, отделенный от orchestration, поиска и применения patch.
 
-Он не ищет место изменения в кодовой базе и не строит индекс проекта. Вместо этого он принимает уже подготовленный request и выполняет следующие задачи:
-
-- применяет внутреннюю budget strategy;
-- собирает prompt для planner, coder, repair или test generator;
-- вызывает выбранную локальную модель;
+Он решает следующие задачи:
+- получает `GenerationRequest` или `RepairRequest`;
+- применяет runtime budget strategy;
+- собирает prompt для нужного режима;
+- вызывает локальную модель через Ollama;
 - разбирает raw-ответ модели;
 - нормализует `code_artifact` или `test_artifact`;
 - возвращает единый `GenerationResult`;
-- сохраняет trace, prompt, raw output и usage-метрики.
+- сохраняет trace и usage-метрики.
+
+Это позволяет держать генерацию отдельно от логики выбора target и отдельно от логики проверки итогового изменения.
 
 ---
 
-## Общая роль в связке с `codecollector`
+## Роль в связке с codecollector
 
-В текущей связке:
+Текущий рабочий сценарий выглядит так:
 
 1. `codecollector` подготавливает `GenerationRequest` или `RepairRequest`;
 2. `codecollector` вызывает CLI `codegenerator`;
-3. `codegenerator` выполняет генерацию или repair;
+3. `codegenerator` собирает prompt и вызывает модель;
 4. `codegenerator` возвращает JSON-результат;
-5. `codecollector` применяет результат и запускает проверки.
+5. `codecollector` применяет артефакт, запускает проверки и определяет итоговый статус run.
 
-Разделение ответственности здесь принципиальное:
+Разделение ответственности важно сохранять.
 
-- `codecollector` отвечает за **структурный состав контекста**;
-- `codegenerator` отвечает за **prompt assembly, runtime budget и вызов модели**.
+### За что отвечает `codecollector`
+- индекс проекта;
+- выбор target;
+- сбор project context;
+- подбор reference artifacts;
+- применение patch;
+- runtime verification;
+- итоговый статус сценария.
+
+### За что отвечает `codegenerator`
+- budget strategy;
+- prompt assembly;
+- вызов модели;
+- parsing и normalization ответа;
+- trace генерации.
 
 ---
 
-## Основные режимы работы
+## Поддерживаемые режимы
 
 ### `generate`
+Режим генерации production-кода.
 
-Режим для генерации production-кода.
+Что делает:
+- принимает `GenerationRequest`;
+- строит prompt для генерации кода;
+- вызывает модель;
+- извлекает и нормализует `code_artifact`.
 
-Последовательность:
-
-1. загрузка `GenerationRequest`;
-2. применение budget strategy к request;
-3. построение planner prompt;
-4. вызов planner model;
-5. построение coder prompt;
-6. вызов coder model;
-7. разбор ответа в `code_artifact`;
-8. валидация canonical operation (`replace_symbol` или `insert_after_symbol`);
-9. возврат `GenerationResult`.
-
-Результат режима:
-
-- ожидается `code_artifact`;
+Ожидаемый результат:
+- заполнен `code_artifact`;
 - `test_artifact` обычно отсутствует.
 
+Пример вызова:
+
+```bash
+python -m codegenerator generate --request-file /path/to/generation_request.json --config /path/to/config.yaml
+```
+
 ### `generate-test`
+Режим генерации тестового файла.
 
-Режим для генерации теста для выбранного target.
+Что делает:
+- принимает `GenerationRequest`;
+- строит prompt для генерации теста;
+- при наличии использует `generated_code_artifact` как основной источник измененного production-кода;
+- использует project context и связанные тесты;
+- извлекает и нормализует `test_artifact`.
 
-Последовательность:
-
-1. загрузка `GenerationRequest`;
-2. применение budget strategy;
-3. построение prompt для test generation;
-4. при наличии `generated_code_artifact` использовать его как основной источник измененного production-кода;
-5. при необходимости использовать `full_file_source`, `related_tests` и example test source;
-6. вызвать `test_generator_model`;
-7. разобрать ответ в `test_artifact`;
-8. вернуть `GenerationResult`.
-
-Результат режима:
-
+Ожидаемый результат:
 - `code_artifact = null`;
-- возвращается только `test_artifact`.
+- заполнен `test_artifact`.
+
+Пример вызова:
+
+```bash
+python -m codegenerator generate-test --request-file /path/to/generation_test_request.json --config /path/to/config.yaml
+```
 
 ### `repair`
+Режим исправления ранее сгенерированного артефакта.
 
-Режим для исправления ранее полученного артефакта.
+Что делает:
+- принимает `RepairRequest`;
+- получает описание ошибки и предыдущий артефакт;
+- строит repair prompt;
+- вызывает модель;
+- возвращает исправленный результат в том же формате `GenerationResult`.
 
-Используется, когда уже есть сгенерированный `code_artifact`, который:
+Пример вызова:
 
-- не применился;
-- не прошел проверки;
-- содержит синтаксическую или структурную проблему.
-
-Последовательность:
-
-1. загрузка `RepairRequest`;
-2. применение budget strategy для repair;
-3. построение repair prompt;
-4. вызов repair model;
-5. разбор ответа;
-6. возврат исправленного результата или структурированной ошибки.
+```bash
+python -m codegenerator repair --request-file /path/to/repair_request.json --config /path/to/config.yaml
+```
 
 ---
 
-## Внутренние функциональные блоки
+## Как устроена генерация
 
-### Budget strategy
+### 1. Загрузка request
+`codegenerator` читает request из JSON или YAML файла.
 
-`codegenerator` управляет runtime budget prompt.
+Поддерживаемые расширения:
+- `.json`
+- `.yaml`
+- `.yml`
 
-Он работает с лимитами из `config.yaml` и решает:
+### 2. Применение budget strategy
+На этом шаге определяется, какой объем контекста реально попадет в prompt.
 
-- сколько user prompt можно передать модели;
-- какие блоки сокращать первыми;
-- какие блоки удалять в последнюю очередь;
-- как вести себя в режимах `generate`, `generate-test` и `repair`.
+`codegenerator` отвечает именно за runtime budget. Он не выбирает сам project context, но решает, как переданные блоки использовать при ограничении модели.
 
-Это текущий центр ответственности за реальное ужатие prompt.
+### 3. Сборка prompt
+Prompt собирается отдельно для каждого режима:
+- production generation;
+- test generation;
+- repair.
 
-### Prompt builder
+### 4. Вызов модели
+Модель вызывается через Ollama с параметрами из `config.yaml`.
 
-Prompt builder собирает итоговые user prompt для разных режимов:
+### 5. Разбор ответа
+Ответ модели приводится к единому формату результата.
 
-- planner;
-- coder;
-- repair;
-- test generator.
-
-На этом шаге учитываются:
-
-- target code;
-- module outline;
-- related tests;
-- full file source;
-- reference artifacts;
-- request description и constraints;
-- служебные правила для модели.
-
-Текущий принцип — prompts должны быть русскоязычными и максимально не смешивать языки без необходимости.
-
-### Логика prompt для `generate-test`
-
-В текущем состоянии логика формирования test prompt должна оставаться простой и поддерживаемой.
-
-Базовые правила:
-
-- ничего не выбрасывать из prompt заранее, если бюджет это позволяет;
-- сначала использовать фактический контекст проекта, а не пример;
-- `generated_code_artifact` важнее исходного target source, если тест строится по уже измененному коду;
-- `related_tests` передаются как основной образец проектного стиля тестов;
-- `example_test_source` используется как fallback, а не как доминирующий источник;
-- урезание контекста выполняется не каскадом из нескольких отдельных фаз, а одной простой стадией, только если блоки не помещаются в бюджет;
-- заранее не оптимизировать prompt под один конкретный demo-тест или конкретную функцию.
-
-Идея текущего состояния — сохранить баланс между качеством и простотой поддержки. Лучше получить неидеальный тест, чем слишком сложную и трудно сопровождаемую систему сборки prompt.
-
-### Gateway / Ollama client
-
-Слой вызова модели отвечает за:
-
-- вызов локального Ollama endpoint;
-- передачу модели, температуры и runtime options;
-- сбор usage-метрик;
-- возврат raw response.
-
-### Parser и normalization
-
-После ответа модели `codegenerator`:
-
-- извлекает JSON;
-- валидирует поля результата;
-- нормализует тип операции;
-- формирует единый `GenerationResult`.
-
-### Trace и логи
-
-Для каждого вызова могут сохраняться:
-
-- шаги budget и trimming;
-- готовый prompt;
-- raw output модели;
-- parsed output;
-- usage-метрики;
-- trace path в `runs/`.
-
-Для `generate-test` дополнительно полезно логировать:
-
-- какие источники реально вошли в test prompt;
-- использовался ли `generated_code_artifact`;
-- использовались ли `related_tests`;
-- использовался ли `example_test_source`;
-- был ли включен `full_file_source`;
-- какие блоки были урезаны из-за budget.
-
-Такое логирование нужно прежде всего для отладки неудачных тестов и для сравнения поведения на разных моделях.
+### 6. Trace и метрики
+Сохраняются trace-файлы, prompt, raw output и usage-метрики.
 
 ---
 
-## CLI
+## Prompt assembly
 
-### Генерация production-кода
+В текущем состоянии prompt assembly должен оставаться простым и объяснимым.
 
-```bash
-python -m codegenerator generate --request-file <request_file> --config <config_path>
-```
+### Основные принципы
+- Не выбрасывать полезный контекст заранее, если он помещается в budget.
+- Не подгонять prompt под один конкретный кейс.
+- Сначала использовать фактический контекст проекта.
+- Не заменять project context общим шаблоном.
+- Не дублировать одни и те же правила в нескольких местах.
 
-### Генерация теста
+### Что особенно важно для `generate-test`
+Порядок приоритета контекста:
+1. `generated_code_artifact`, если он передан;
+2. `target_symbol` и фактический измененный код;
+3. `related_tests`;
+4. `full_file_source`, если он реально нужен;
+5. `example_test_source` только как дополнительный источник.
 
-```bash
-python -m codegenerator generate-test --request-file <request_file> --config <config_path>
-```
+Это нужно, чтобы тесты по возможности повторяли реальные паттерны проекта и не выдумывали лишнее.
 
-### Repair
-
-```bash
-python -m codegenerator repair --request-file <request_file> --config <config_path>
-```
-
-Формат request определяется по расширению файла:
-
-- `.json` — JSON;
-- `.yaml` и `.yml` — YAML.
-
-Результат всех команд выводится в stdout в формате JSON.
+### Что не нужно делать
+- Не превращать prompt в набор специальных инструкций ради одной ошибки.
+- Не усиливать одну частную эвристику так, что она начинает мешать остальным сценариям.
+- Не переносить в prompt проектные детали, которые должны приходить через request.
 
 ---
 
-## Входной контракт `GenerationRequest`
+## Генерация тестов
 
-`GenerationRequest` используется для режимов `generate` и `generate-test`.
+Тестогенерация — отдельный режим с отдельными ограничениями.
 
-Структура:
+Цель не в том, чтобы любой ценой получить «умный» тест. Цель — получить полезный и правдоподобный тест, который:
+- использует реальные символы проекта;
+- не придумывает несуществующие поля и сигнатуры;
+- не требует несуществующих зависимостей;
+- по возможности повторяет существующие тестовые паттерны проекта.
+
+### Практические правила
+- Если есть `related_tests`, они важнее шаблонного примера.
+- Если есть `generated_code_artifact`, тест должен ориентироваться на него, а не на старую версию target.
+- Если структура проекта неоднозначна, лучше быть проще, чем домысливать поведение.
+- `example_test_source` — это fallback, а не основа генерации.
+
+### Что считается плохим результатом
+- придуманные поля модели;
+- несуществующие аргументы конструктора;
+- несуществующие импорты;
+- тест, который не покрывает измененный символ;
+- тест, который зависит от контракта, отсутствующего в project context.
+
+---
+
+## Repair
+
+`repair` используется, когда уже есть артефакт, но его нужно исправить.
+
+Типовые причины:
+- синтаксическая ошибка;
+- некорректная структура артефакта;
+- артефакт не применился;
+- артефакт не прошел проверки в `codecollector`.
+
+### Что передается в repair
+Обычно repair получает:
+- исходный change request;
+- предыдущий артефакт;
+- описание ошибки;
+- project context;
+- reference context;
+- служебные опции.
+
+### Что важно сохранять
+- repair должен чинить артефакт, а не менять смысл задачи;
+- результат repair должен быть того же типа, что и исходный артефакт;
+- по trace должно быть видно, что именно repair пытался исправить.
+
+---
+
+## Входные данные
+
+## `GenerationRequest`
+
+Используется для `generate` и `generate-test`.
+
+Типовая структура:
 
 ```json
 {
-  "request_id": "generate-build_priority_label",
+  "request_id": "generate-build_assignment_message",
   "mode": "generate",
   "change_request": {
-    "title": "...",
-    "description": "...",
-    "constraints": ["..."],
-    "notes": ["..."]
+    "title": "Изменить текст уведомления о назначении тикета",
+    "description": "Сделать уведомление на русском языке.",
+    "constraints": [
+      "Не менять внешний контракт API"
+    ],
+    "notes": []
   },
   "target": {
-    "qualname": "support_app.services.report_service.build_priority_label",
-    "file_path": "support_app/services/report_service.py",
+    "qualname": "support_app.services.notification_service.build_assignment_message",
+    "file_path": "support_app/services/notification_service.py",
     "operation": "replace_symbol"
   },
   "project_context": {
@@ -259,76 +259,26 @@ python -m codegenerator repair --request-file <request_file> --config <config_pa
   "reference_context": {
     "reference_artifacts": []
   },
-  "generated_code_artifact": {},
-  "options": {}  
+  "generated_code_artifact": null,
+  "options": {}
 }
 ```
 
-### Основные поля `GenerationRequest`
+### Основные поля
+- `request_id` — идентификатор запуска;
+- `mode` — `generate` или `generate_test`;
+- `change_request` — описание изменения;
+- `target` — target symbol и операция;
+- `project_context` — контекст проекта;
+- `reference_context` — reference artifacts;
+- `generated_code_artifact` — уже сгенерированный production-код, если он нужен для теста;
+- `options` — дополнительные опции.
 
-#### `request_id`
-Уникальный идентификатор запуска.
+## `RepairRequest`
 
-#### `mode`
-Режим вызова:
+Используется только для `repair`.
 
-- `generate`;
-- `generate_test`.
-
-#### `change_request`
-Описание изменения.
-
-Поля:
-
-- `title`;
-- `description`;
-- `constraints`;
-- `notes`.
-
-#### `target`
-Описание символа, который должен быть изменен.
-
-Поля:
-
-- `qualname`;
-- `file_path`;
-- `operation`.
-
-#### `project_context`
-Контекст по проекту.
-
-Поля:
-
-- `module_outline`;
-- `full_file_source`;
-- `target_symbol`;
-- `related_tests`;
-- `recommended_tests`.
-
-#### `reference_context`
-Контекст из reference library.
-
-Поля:
-
-- `reference_artifacts`.
-
-#### `generated_code_artifact`
-Дополнительное поле для связанных сценариев генерации. В `generate-test` содержит уже сгенерированный production-код, который используется как основной target source для генерации теста.
-
-#### `options`
-Опции генерации.
-
-#### `context_metrics`
-Служебные метрики budget/trimming, которые формируются внутри `codegenerator` и сохраняются в trace. Не являются обязательной частью внешнего request-контракта.
-
----
-
-## Входной контракт `RepairRequest`
-
-`RepairRequest` используется только для режима `repair`.
-
-Основные поля:
-
+Обычно содержит:
 - `request_id`;
 - `mode`;
 - `previous_generation_request_id`;
@@ -339,30 +289,15 @@ python -m codegenerator repair --request-file <request_file> --config <config_pa
 - `reference_context`;
 - `options`.
 
-### Важные поля `RepairRequest`
-
-#### `error_context`
-Описывает, почему исходный артефакт нужно исправить.
-
-Обычно содержит:
-
-- тип ошибки;
-- краткую summary;
-- failed checks;
-- messages;
-- stage.
-
-#### `previous_artifact`
-Ранее сгенерированный артефакт, который требуется исправить.
+Главное отличие от `GenerationRequest` — наличие контекста ошибки и предыдущего артефакта.
 
 ---
 
-## Выходной контракт `GenerationResult`
+## Выходной результат
 
-Во всех режимах проект возвращает единый JSON-результат.
+Во всех режимах возвращается JSON.
 
-Основные поля:
-
+Основные поля результата:
 - `request_id`;
 - `status`;
 - `code_artifact`;
@@ -375,9 +310,7 @@ python -m codegenerator repair --request-file <request_file> --config <config_pa
 - `message`.
 
 ### `code_artifact`
-
-Для production-кода обычно содержит:
-
+Обычно содержит:
 - `operation`;
 - `target_qualname`;
 - `target_file`;
@@ -385,16 +318,14 @@ python -m codegenerator repair --request-file <request_file> --config <config_pa
 - `insert_after`.
 
 ### `test_artifact`
-
-Для тестогенерации обычно содержит:
-
+Обычно содержит:
 - `file_path`;
 - `source_code`.
 
 ### `llm_usage`
+Позволяет понять стоимость и длительность генерации.
 
-Содержит агрегированные метрики вызова модели, например:
-
+Типовые поля:
 - `calls`;
 - `prompt_tokens`;
 - `output_tokens`;
@@ -407,27 +338,51 @@ python -m codegenerator repair --request-file <request_file> --config <config_pa
 
 ---
 
+## Поддерживаемые операции артефакта
+
+Сейчас поддерживаются две canonical operations:
+- `replace_symbol`
+- `insert_after_symbol`
+
+### `replace_symbol`
+Означает замену существующего symbol.
+
+### `insert_after_symbol`
+Означает вставку нового symbol после указанного anchor symbol.
+
+Для `insert_after_symbol` важно:
+- сохранить `insert_after`;
+- вернуть только новый symbol;
+- не добавлять module-level imports в сам артефакт, если внешний контракт ожидает только вставляемый код.
+
+Любое другое значение операции считается ошибкой контракта.
+
+---
+
 ## Конфигурация
 
-Основной конфиг хранится в `config.yaml`.
+Основной конфиг находится в `config.yaml`.
 
-### `llm.ollama`
+### Что в нем хранится
+- параметры Ollama;
+- модели для разных режимов;
+- пути к prompt templates;
+- настройки generation и repair;
+- правила budget strategy;
+- настройки trace и логирования.
 
-Определяет параметры вызова Ollama:
-
+### Важные разделы
+#### `llm.ollama`
+Содержит параметры вызова модели, например:
 - `base_url`;
 - `timeout_sec`;
-- `think`;
 - `temperature`;
 - `num_ctx`;
 - `num_predict`;
-- `keep_alive`;
-- `options.*`.
+- `keep_alive`.
 
-### `codegenerator.prompts`
-
-Пути к prompt templates:
-
+#### `codegenerator.prompts`
+Содержит пути к prompt templates:
 - `system_rules`;
 - `planner_user_template`;
 - `coder_user_template`;
@@ -435,53 +390,50 @@ python -m codegenerator repair --request-file <request_file> --config <config_pa
 - `test_generator_user_template`;
 - `test_generator_example`.
 
-### `codegenerator.models`
+#### `codegenerator.models`
+Определяет модели для:
+- planner;
+- coder;
+- repair;
+- test generation.
 
-Модели для разных шагов:
+#### `codegenerator.trace`
+Настройки trace:
+- сохранять ли trace в файл;
+- сохранять ли prompt;
+- сохранять ли raw output;
+- куда писать trace.
 
-- `planner_model`;
-- `coder_model`;
-- `test_generator_model`;
-- `repair_model`.
-
-### `codegenerator.generation`
-
-Runtime-параметры генерации:
-
-- `repair_enabled`;
-- `max_repair_attempts`;
-- `test_generation_mode`;
-- `test_generator_max_example_tests`;
-- budget и trimming policy для разных режимов.
-
-### `codegenerator.defaults`
-
-Default constraints, которые могут добавляться к request.
-
-### `codegenerator.trace`
-
-Настройки trace и логирования:
-
-- `save_to_file`;
-- `show_prompts`;
-- `show_raw_llm_output`;
-- `output_dir`.
-
----
-
-## Переопределение конфигурации через environment variables
-
-`config.py`:
-
-- читает `config.yaml`;
-- переопределяет существующие значения через переменные окружения с префиксом проекта;
-- позволяет добавлять новые ключи через env без изменения загрузчика.
+### Environment overrides
+Конфиг можно переопределять через переменные окружения.
 
 Примеры:
 
-- `RS__LLM__OLLAMA__BASE_URL=http://127.0.0.1:11434`
-- `RS__CODEGENERATOR__MODELS__CODER_MODEL=qwen2.5-coder:14b-instruct-q4_K_M`
-- `RS__CODEGENERATOR__TRACE__OUTPUT_DIR=runs`
+```bash
+export RS__LLM__OLLAMA__BASE_URL=http://127.0.0.1:11434
+export RS__CODEGENERATOR__MODELS__CODER_MODEL=qwen2.5-coder:14b-instruct-q4_K_M
+export RS__CODEGENERATOR__TRACE__OUTPUT_DIR=runs
+```
+
+---
+
+## Логирование и trace
+
+Логи и trace нужны не только для фиксации факта вызова модели, но и для разбора качества генерации.
+
+Что полезно видеть:
+- какой режим вызван;
+- какой request обработан;
+- какие блоки реально вошли в prompt;
+- использовался ли `full_file_source`;
+- использовались ли `related_tests`;
+- использовался ли `generated_code_artifact`;
+- использовался ли `example_test_source`;
+- какие блоки были урезаны;
+- итоговый размер prompt;
+- usage-метрики модели.
+
+Для неудачных generated test это особенно важно.
 
 ---
 
@@ -491,22 +443,22 @@ Default constraints, которые могут добавляться к request
 Основная конфигурация проекта.
 
 ### `prompts/`
-Промпты и шаблоны для planner, coder, repair и test generation.
+Шаблоны prompt-ов для всех режимов.
 
 ### `runs/`
-Логи и trace-файлы запусков генерации.
+Trace-файлы, логи и артефакты вызовов модели.
 
 ### `examples/`
-Примеры request-файлов для запуска.
+Примеры request-файлов.
 
 ### `orchestration/`
-Основная orchestration-логика режимов `generate`, `generate-test`, `repair`.
+Основная логика режимов `generate`, `generate-test`, `repair`.
 
 ### `context/`
 Budget strategy и работа с контекстом.
 
 ### `llm/`
-Вызов Ollama и gateway к модели.
+Клиент вызова Ollama.
 
 ### `parsers/` и `normalization/`
 Разбор и нормализация ответа модели.
@@ -515,86 +467,69 @@ Budget strategy и работа с контекстом.
 
 ## Текущие ограничения
 
-На текущем этапе проект имеет следующие ограничения:
-
+На текущем этапе:
 - основная поддержка — Python;
 - модели вызываются локально через Ollama;
-- качество генерации зависит от конкретной модели и размера prompt;
-- `generate-test` особенно чувствителен к качеству target-контекста и правилам prompt;
-- часть сценариев `generate` все еще может потребовать отдельный `repair`;
-- проект рассчитан на работу как внешний генератор, а не как самостоятельный индексатор кодовой базы.
+- качество генерации зависит от модели и размера prompt;
+- `generate-test` особенно чувствителен к качеству project context;
+- часть сценариев требует `repair`;
+- проект работает как внешний генератор, а не как самостоятельный orchestration-слой.
 
 ---
 
 ## Что считается текущим рабочим сценарием
 
 Текущий рабочий сценарий:
-
-- получить `GenerationRequest` или `RepairRequest` от `codecollector`;
+- получить request от `codecollector`;
 - собрать prompt с учетом budget;
-- вызвать локальную модель;
+- вызвать модель;
 - вернуть нормализованный JSON-результат;
-- сохранить trace вызова.
+- сохранить trace.
 
-Именно этот сценарий сейчас считается основным и должен сохраняться при дальнейших изменениях, даже если внешний способ вызова будет позже переведен с CLI на локальный API.
-
----
-
-## Поддерживаемые операции code artifact
-
-Текущие canonical operations:
-
-- `replace_symbol` — заменить существующий symbol;
-- `insert_after_symbol` — вставить новый symbol после указанного anchor symbol.
-
-Любое значение операции, отличное от `replace_symbol` и `insert_after_symbol`, считается ошибкой контракта.
-
-Для `insert_after_symbol` генератор должен вернуть:
-
-- `operation = "insert_after_symbol"`;
-- `insert_after = <qualname anchor-symbol>`;
-- `code` содержит только новый class/function symbol без module-level imports.
+Именно это состояние нужно считать актуальным при изменениях документации и кода.
 
 ---
 
-## Актуальные направления развития
+## Практические примеры
 
-Текущие направления развития:
+### Пример для replace_symbol
+Из `codecollector` приходит request на замену существующей функции. `codegenerator` должен вернуть новый `code_artifact` с операцией `replace_symbol` и кодом только для этой функции.
 
-- дальнейшее улучшение budget strategy;
-- улучшение качества `generate-test` на малых моделях;
-- развитие правил против «додумывания» поведения в тестах;
-- усиление устойчивости `generate` без обязательного repair;
-- расширение поддержки других языков;
-- переход от CLI-вызова к локальному сервису или API с сохранением JSON-контракта.
+### Пример для insert_after_symbol
+Из `codecollector` приходит request на добавление новой dataclass после существующего класса-якоря. `codegenerator` должен вернуть `insert_after_symbol`, указать anchor symbol и вернуть только новый класс.
+
+### Пример для generate-test
+Если production-код уже сгенерирован, тест должен строиться по `generated_code_artifact`, а не по исходной версии функции. Это особенно важно для сценариев, где после генерации изменился текст сообщения, сигнатура или возвращаемое значение.
+
+---
+
+## Что не нужно делать
+
+- Не подгонять prompt под один demo-case.
+- Не переносить проектные знания из `codecollector` в код генератора.
+- Не усложнять budget strategy ради одной ошибки.
+- Не хранить проектно-зависимые константы в коде, если они могут прийти через request или config.
+- Не дублировать одни и те же инструкции в нескольких шаблонах.
 
 ---
 
 ## TODO
 
-### По генерации тестов
+### Ближайшие направления
+- улучшать качество `generate-test` без усложнения базовой архитектуры;
+- улучшать диагностику причин неудачной генерации тестов;
+- развивать budget strategy, сохраняя простоту и воспроизводимость;
+- повышать устойчивость `generate`, чтобы реже требовался `repair`.
 
-- продолжить улучшение качества `generate-test` после перехода на более мощные модели;
-- сохранить простую и прозрачную логику формирования test prompt;
-- не допускать чрезмерного усложнения trimming policy ради одного частного кейса;
-- отдельно развивать диагностику причин неудачной генерации тестов через trace и логи.
-
-### По библиотекам и дополнительному контексту
-
-- отдельно доработать работу с дополнительными библиотеками и reference-контекстом;
-- точнее управлять тем, какие вспомогательные примеры действительно полезны модели;
-- сохранить общее, а не кейс-специфичное наполнение prompt.
-
-### По архитектуре
-
-- сохранить текущий JSON-контракт между `codecollector` и `codegenerator`;
-- при переходе с CLI на локальный сервис не менять семантику `GenerationRequest`, `RepairRequest` и `GenerationResult`;
-- постепенно расширять language-agnostic часть генератора без усложнения текущего Python-first сценария.
+### Среднесрочные направления
+- точнее работать с библиотечным и проектным окружением;
+- расширять поддержку других языков;
+- сохранить JSON-контракт при возможном переходе с CLI на локальный сервис.
 
 ---
 
 ## Итог
 
-`codegenerator` в текущем состоянии — это внешний генератор кода и тестов, который принимает уже подготовленный структурированный request, управляет budget prompt, вызывает локальную LLM, нормализует результат и возвращает его в стабильном машиночитаемом формате.
+`codegenerator` в текущем состоянии — это внешний генератор кода, тестов и repair-артефактов, который получает уже подготовленный структурированный request, управляет runtime budget, вызывает локальную модель, нормализует результат и возвращает его в стабильном машиночитаемом формате.
 
-Его основная роль — сделать генерацию воспроизводимой, контролируемой и пригодной для использования внутри orchestration-слоя `codecollector`.
+Его задача — делать генерацию воспроизводимой, управляемой и пригодной для использования внутри orchestration-слоя `codecollector`.
