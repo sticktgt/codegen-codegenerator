@@ -28,8 +28,11 @@ Full file source:
 
 {related_tests_block}
 
+{reference_context_block}
+
 {import_context_block}
 
 {inferred_symbols_block}
 
-{source_priority_block}
+Приоритет контекста:
+Сначала опирайся на связанные тесты, полный исходник файла, справочные примеры и явные сигнатуры/импорты. Не придумывай отсутствующие import path, поля, методы и аргументы конструктора.

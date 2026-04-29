@@ -42,6 +42,7 @@ codegenerator:
     coder_max_full_file_chars: 900 # 0
     repair_prompt_hard_limit: 9000
     repair_max_reference_chars: 700 # 420
+    test_prompt_reference_chars: 700
 
     test_prompt_related_tests_truncate_chars: 320
     test_prompt_full_file_truncate_chars: 380
@@ -66,3 +67,18 @@ codegenerator:
     repair_chars_limit: 9000
     min_user_prompt_chars: 400
     user_prompt_reserve_chars: 100
+
+  prompt_assembly:
+    test_reference_max_items: 1
+    test_planner_related_tests_max_items: 1
+    test_planner_related_tests_per_item_chars: 450
+    test_planner_inferred_symbols_count: 20
+    test_planner_full_file_chars: 900
+    test_planner_related_tests_chars: 450
+    test_planner_import_context_chars: 500
+    test_planner_inferred_symbols_chars: 300
+    test_insert_after_example_chars: 260
+    test_insert_after_import_context_chars: 220
+    test_insert_after_inferred_symbols_chars: 120
+    test_insert_after_request_chars: 180
+    test_soft_overflow_chars: 350

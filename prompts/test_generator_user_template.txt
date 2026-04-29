@@ -50,10 +50,12 @@
 {request}
 
 {test_plan_block}
-{source_priority_block}
+Приоритет контекста:
+Сначала опирайся на связанные тесты, полный исходник файла и явные сигнатуры/импорты; используй generated target-код только если он не противоречит более стабильному проектному контексту.
 {target_function_block}
 {full_file_source_block}
 {example_test_block}
 {related_tests_block}
+{reference_context_block}
 {import_context_block}
 {inferred_symbols_block}

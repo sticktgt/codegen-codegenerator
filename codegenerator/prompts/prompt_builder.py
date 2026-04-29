@@ -103,9 +103,9 @@ def _render_reference_artifacts(
 
     for item in artifacts:
         raw_content = str(item.get("content", ""))
-        if per_item_chars > 0 and len(raw_content) > per_item_chars:
-            continue
         content = raw_content
+        if per_item_chars > 0 and len(content) > per_item_chars:
+            content, _ = _truncate_text(content, per_item_chars)
         title = str(item.get("title", ""))
         usage_mode = str(item.get("usage_mode", ""))
         block = f"Title: {title}\nUsage mode: {usage_mode}\nCode:\n{content}"
@@ -201,6 +201,7 @@ def build_test_planner_user_prompt(
     available_user_chars: int | None = None,
     default_constraints: list[str] | None = None,
     planner_result: dict[str, Any] | None = None,
+    runtime_config: RuntimeConfig | None = None,
 ) -> tuple[str, dict[str, Any]]:
     pc = request.project_context or {}
     target_symbol = pc.get("target_symbol") or {}
@@ -239,27 +240,59 @@ def build_test_planner_user_prompt(
         ).strip()
 
     full_file_source = str(pc.get("full_file_source", "") or "").strip()
+    planner_related_tests_max_items = (
+        runtime_config.prompt_assembly.test_planner_related_tests_max_items
+        if runtime_config
+        else 1
+    )
+    planner_related_tests_per_item_chars = (
+        runtime_config.prompt_assembly.test_planner_related_tests_per_item_chars
+        if runtime_config
+        else 450
+    )
     related_tests_text, related_test_metrics = _render_related_tests(
         pc,
-        max_items=1,
-        per_item_chars=450,
+        max_items=planner_related_tests_max_items,
+        per_item_chars=planner_related_tests_per_item_chars,
     )
     if related_tests_text == "none":
         related_tests_text = ""
 
+    reference_context_block, reference_metrics = _build_test_reference_context_block(
+        request.reference_context or {},
+        runtime_config=runtime_config,
+    )
+
     import_context_text = _extract_import_context(full_file_source)
     inferred_symbols = _infer_project_symbols(target_source)
-    inferred_symbols_text = "\n".join(f"- {name}" for name in inferred_symbols[:20])
+    inferred_symbols_limit = (
+        runtime_config.prompt_assembly.test_planner_inferred_symbols_count
+        if runtime_config
+        else 20
+    )
+    inferred_symbols_text = "\n".join(f"- {name}" for name in inferred_symbols[:inferred_symbols_limit])
 
-    if isinstance(available_user_chars, int) and available_user_chars > 0:
-        if len(full_file_source) > 900:
-            full_file_source, _ = _truncate_text(full_file_source, 900)
-        if len(related_tests_text) > 450:
-            related_tests_text, _ = _truncate_text(related_tests_text, 450)
-        if len(import_context_text) > 500:
-            import_context_text, _ = _truncate_text(import_context_text, 500)
-        if len(inferred_symbols_text) > 300:
-            inferred_symbols_text, _ = _truncate_text(inferred_symbols_text, 300)
+    if isinstance(available_user_chars, int) and available_user_chars > 0 and runtime_config:
+        if len(full_file_source) > runtime_config.prompt_assembly.test_planner_full_file_chars:
+            full_file_source, _ = _truncate_text(
+                full_file_source,
+                runtime_config.prompt_assembly.test_planner_full_file_chars,
+            )
+        if len(related_tests_text) > runtime_config.prompt_assembly.test_planner_related_tests_chars:
+            related_tests_text, _ = _truncate_text(
+                related_tests_text,
+                runtime_config.prompt_assembly.test_planner_related_tests_chars,
+            )
+        if len(import_context_text) > runtime_config.prompt_assembly.test_planner_import_context_chars:
+            import_context_text, _ = _truncate_text(
+                import_context_text,
+                runtime_config.prompt_assembly.test_planner_import_context_chars,
+            )
+        if len(inferred_symbols_text) > runtime_config.prompt_assembly.test_planner_inferred_symbols_chars:
+            inferred_symbols_text, _ = _truncate_text(
+                inferred_symbols_text,
+                runtime_config.prompt_assembly.test_planner_inferred_symbols_chars,
+            )
 
     values = {
         "request": compact_request_text,
@@ -271,10 +304,8 @@ def build_test_planner_user_prompt(
         "related_tests_block": _render_optional_block("Связанные тесты проекта", related_tests_text),
         "import_context_block": _render_optional_block("Импорты из целевого файла", import_context_text),
         "inferred_symbols_block": _render_optional_block("Символы проекта из target-кода", inferred_symbols_text),
-        "source_priority_block": _render_optional_block(
-            "Приоритет контекста",
-            "Сначала опирайся на связанные тесты, полный исходник файла и явные сигнатуры/импорты. Не придумывай отсутствующие import path, поля, методы и аргументы конструктора."
-        ),
+        "source_priority_block": "",
+        "reference_context_block": reference_context_block,
         "anchor_symbol": anchor_symbol or "null",
     }
 
@@ -284,6 +315,11 @@ def build_test_planner_user_prompt(
     )
 
     prompt = template_text.format(**values)
+    if "{reference_context_block}" not in template_text and values.get("reference_context_block"):
+        prompt += values["reference_context_block"]
+    if isinstance(available_user_chars, int) and available_user_chars > 0 and len(prompt) > available_user_chars and values.get("reference_context_block"):
+        values["reference_context_block"] = ""
+        prompt = template_text.format(**values)
 
     metrics = {
         "test_planner_target_source_origin": target_source_origin,
@@ -298,6 +334,9 @@ def build_test_planner_user_prompt(
         "test_planner_request_chars": len(compact_request_text),
         "test_planner_prompt_chars": len(prompt),
         "test_planner_default_constraints_count": len(default_constraints),
+        "test_planner_reference_count": int(reference_metrics.get("reference_count", 0) or 0),
+        "test_planner_reference_chars": int(reference_metrics.get("reference_chars", 0) or 0),
+        "test_planner_has_reference_context": bool(values.get("reference_context_block")),
     }
     return prompt, metrics
 
@@ -1046,6 +1085,25 @@ def _resolve_test_target_symbol(
     )
     return effective_symbol, anchor_symbol or None
 
+def _build_test_reference_context_block(
+    reference_context: dict[str, Any],
+    runtime_config: RuntimeConfig | None,
+) -> tuple[str, dict[str, Any]]:
+    max_chars = int(runtime_config.test_prompt_reference_chars or 0) if runtime_config else 420
+    max_items = runtime_config.prompt_assembly.test_reference_max_items if runtime_config else 1
+    if max_chars <= 0 or max_items <= 0:
+        return "", {"reference_count": 0, "reference_chars": 0}
+    reference_text, metrics = _render_reference_artifacts(
+        reference_context or {},
+        max_items=max_items,
+        per_item_chars=max_chars,
+    )
+    reference_text = _normalize_optional_value(reference_text)
+    if not reference_text:
+        return "", metrics
+    return _render_optional_block("Справочные примеры для теста", reference_text), metrics
+
+
 def _build_test_prompt_values(
     *,
     request: GenerationRequest,
@@ -1061,7 +1119,8 @@ def _build_test_prompt_values(
     effective_target_kind: str,
     effective_target_name: str,
     anchor_symbol: str | None,
-    test_plan_text: str,    
+    test_plan_text: str,
+    reference_context_block: str = "",
 ) -> dict[str, str]:
     target_block = _render_optional_block("Сгенерированный target-код", target_source)
     example_block = _render_optional_block("Пример теста", example_text)
@@ -1091,10 +1150,7 @@ def _build_test_prompt_values(
         "request": compact_request_text,
         "module_outline": "[]",
         "module_outline_block": "",
-        "source_priority_block": _render_optional_block(
-            "Приоритет контекста",
-            "Сначала опирайся на связанные тесты, полный исходник файла и явные сигнатуры/импорты; используй generated target-код только если он не противоречит более стабильному проектному контексту."
-        ),
+        "source_priority_block": "",
         "target_function_block": target_block,
         "full_file_source": full_file_source_text,
         "full_file_source_block": full_file_source_block,
@@ -1105,6 +1161,7 @@ def _build_test_prompt_values(
         "import_context_block": import_context_block,
         "inferred_symbols_block": inferred_symbols_block,
         "test_plan_block": test_plan_block,
+        "reference_context_block": reference_context_block,
     }
 
 def _log_test_prompt_state(
@@ -1121,12 +1178,13 @@ def _log_test_prompt_state(
     compact_request_text: str,
     effective_target_symbol: str,
     anchor_symbol: str | None,
+    reference_context_block: str = "",
 ) -> None:
     logger.info(
         "Test prompt state stage=%s operation=%s prompt_chars=%s available_user_chars=%s "
         "target_chars=%s request_chars=%s example_chars=%s related_tests_chars=%s "
         "has_related_tests=%s import_context_chars=%s inferred_symbols_chars=%s "
-        "effective_target_symbol=%s anchor_symbol=%s",
+        "reference_chars=%s has_reference=%s effective_target_symbol=%s anchor_symbol=%s",
         stage,
         requested_operation,
         prompt_len,
@@ -1138,6 +1196,8 @@ def _log_test_prompt_state(
         bool(str(related_tests_text or "").strip()),
         len(import_context_text or ""),
         len(inferred_symbols_text or ""),
+        len(reference_context_block or ""),
+        bool(str(reference_context_block or "").strip()),
         effective_target_symbol,
         anchor_symbol,
     )
@@ -1197,6 +1257,11 @@ def build_test_generator_user_prompt(
     else:
         example_text, _ = _truncate_text(example_test_source or "", 700)
 
+    reference_context_block, reference_metrics = _build_test_reference_context_block(
+        request.reference_context or {},
+        runtime_config,
+    )
+
     import_context_text = _extract_import_context(full_file_source_text)
     inferred_symbols = _infer_project_symbols(target_source)
     inferred_symbols_text = "\n".join(f"- {name}" for name in inferred_symbols)
@@ -1208,9 +1273,9 @@ def build_test_generator_user_prompt(
 
     trim_steps: list[str] = []
 
-    # Небольшой мягкий запас: лучше сохранить проектный контекст,
+    # Мягкий запас настраивается через config.yaml: лучше сохранить проектный контекст,
     # чем идеально уложиться в лимит, но потерять full_file/related_tests.
-    soft_overflow_chars = 350
+    soft_overflow_chars = runtime_config.prompt_assembly.test_soft_overflow_chars
 
     def _record(step: str) -> None:
         trim_steps.append(step)
@@ -1249,24 +1314,25 @@ def build_test_generator_user_prompt(
             _record(reason)
 
     if requested_operation == "insert_after_symbol":
-        if related_tests_text:
-            _clear_related_tests("removed related_tests for insert_after_symbol")
-
         if example_text:
-            example_text, _ = _truncate_text(example_text, 260)
-            _record("truncated example_text to 260 for insert_after_symbol")
+            limit = runtime_config.prompt_assembly.test_insert_after_example_chars
+            example_text, _ = _truncate_text(example_text, limit)
+            _record(f"truncated example_text to {limit} for insert_after_symbol")
 
         if import_context_text:
-            import_context_text, _ = _truncate_text(import_context_text, 220)
-            _record("truncated import_context to 220 for insert_after_symbol")
+            limit = runtime_config.prompt_assembly.test_insert_after_import_context_chars
+            import_context_text, _ = _truncate_text(import_context_text, limit)
+            _record(f"truncated import_context to {limit} for insert_after_symbol")
 
         if inferred_symbols_text:
-            inferred_symbols_text, _ = _truncate_text(inferred_symbols_text, 120)
-            _record("truncated inferred_symbols to 120 for insert_after_symbol")
+            limit = runtime_config.prompt_assembly.test_insert_after_inferred_symbols_chars
+            inferred_symbols_text, _ = _truncate_text(inferred_symbols_text, limit)
+            _record(f"truncated inferred_symbols to {limit} for insert_after_symbol")
 
         if compact_request_text:
-            compact_request_text, _ = _truncate_text(compact_request_text, 180)
-            _record("truncated request to 180 for insert_after_symbol")
+            limit = runtime_config.prompt_assembly.test_insert_after_request_chars
+            compact_request_text, _ = _truncate_text(compact_request_text, limit)
+            _record(f"truncated request to {limit} for insert_after_symbol")
 
     def _render_prompt() -> str:
         values = _build_test_prompt_values(
@@ -1283,9 +1349,13 @@ def build_test_generator_user_prompt(
             effective_target_kind=effective_target_kind,
             effective_target_name=effective_target_name,
             anchor_symbol=anchor_symbol,
-            test_plan_text=test_plan_text,            
+            test_plan_text=test_plan_text,
+            reference_context_block=reference_context_block,
         )
-        return template_text.format(**values)
+        prompt_value = template_text.format(**values)
+        if "{reference_context_block}" not in template_text and values.get("reference_context_block"):
+            prompt_value += values["reference_context_block"]
+        return prompt_value
 
     def _log(stage: str, prompt_value: str) -> None:
         _log_test_prompt_state(
@@ -1301,6 +1371,7 @@ def build_test_generator_user_prompt(
             compact_request_text=compact_request_text,
             effective_target_symbol=effective_target_symbol,
             anchor_symbol=anchor_symbol,
+            reference_context_block=reference_context_block,
         )
 
     def _fits_with_soft_overflow(prompt_value: str) -> bool:
@@ -1331,6 +1402,12 @@ def build_test_generator_user_prompt(
         _record("removed compact_request_text on size limit")
         prompt = _render_prompt()
         _log("after_remove_request", prompt)
+
+    if len(prompt) > available_user_chars and reference_context_block:
+        reference_context_block = ""
+        _record("removed reference_context_block on size limit")
+        prompt = _render_prompt()
+        _log("after_remove_reference_context", prompt)
 
     # Одна простая попытка ужать related tests, не вводя многоступенчатую схему.
     if len(prompt) > available_user_chars and related_tests_text:
@@ -1372,6 +1449,12 @@ def build_test_generator_user_prompt(
 # реальный паттерн создания и использования project objects.
 # import_context тоже стараемся держать дольше, потому что он помогает
 # использовать реальные import path и не придумывать отсутствующие модули.
+    if not _fits_with_soft_overflow(prompt) and reference_context_block:
+        reference_context_block = ""
+        _record("removed reference_context_block on hard size overflow")
+        prompt = _render_prompt()
+        _log("after_remove_reference_context_hard", prompt)
+
     if not _fits_with_soft_overflow(prompt) and full_file_source_text:
         full_file_source_text = ""
         _record("removed full_file_source context on hard size overflow")
@@ -1400,7 +1483,7 @@ def build_test_generator_user_prompt(
         "test prompt final blocks operation=%s prompt_chars=%s available_user_chars=%s "
         "soft_overflow_chars=%s has_request=%s has_full_file=%s has_example=%s "
         "has_related_tests=%s target_chars=%s request_chars=%s full_file_chars=%s "
-        "example_chars=%s related_tests_chars=%s",
+        "example_chars=%s related_tests_chars=%s reference_chars=%s has_reference=%s",
         requested_operation,
         len(prompt),
         available_user_chars,
@@ -1414,6 +1497,8 @@ def build_test_generator_user_prompt(
         len(full_file_source_text),
         len(example_text),
         len(related_tests_text or ""),
+        len(reference_context_block or ""),
+        bool(str(reference_context_block or "").strip()),
     )
 
     _log("final", prompt)
@@ -1435,10 +1520,13 @@ def build_test_generator_user_prompt(
         "test_effective_target_kind": effective_target_kind,
         "test_effective_target_name": effective_target_name,
         "test_trim_steps": trim_steps,
+        "test_reference_count": int(reference_metrics.get("reference_count", 0) or 0),
+        "test_reference_chars": int(reference_metrics.get("reference_chars", 0) or 0),
         "test_has_example_block": bool(example_text),
         "test_has_related_tests_block": bool(str(related_tests_text or "").strip()),
         "test_has_import_context_block": bool(import_context_text),
         "test_has_inferred_symbols_block": bool(inferred_symbols_text),
         "test_has_full_file_context": bool(full_file_source_text),
+        "test_has_reference_context": bool(reference_context_block),
     }
     return prompt, metrics

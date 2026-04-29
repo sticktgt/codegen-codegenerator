@@ -184,8 +184,13 @@ def apply_budget_strategy(
     budget = config.budget_strategy
 
     if mode == "generate_test":
-        if budget.generate_test_drop_reference:
+        include_reference_requested = bool(
+            (request.get("options") or {}).get("generate_test_include_reference_artifacts", False)
+        )
+        if budget.generate_test_drop_reference and not include_reference_requested:
             _drop_all_reference_artifacts(request, trim_log)
+        else:
+            _keep_single_test_example(request, trim_log)
         _trim_module_outline(request, keep=budget.generate_test_module_outline_keep, trim_log=trim_log)
         _trim_related_tests(
             request,

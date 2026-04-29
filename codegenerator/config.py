@@ -104,6 +104,19 @@ class PromptAssemblySettings:
     test_example_trim_second_chars: int
     test_target_trim_final_chars: int
     test_example_trim_final_chars: int
+    test_reference_max_items: int
+    test_planner_related_tests_max_items: int
+    test_planner_related_tests_per_item_chars: int
+    test_planner_inferred_symbols_count: int
+    test_planner_full_file_chars: int
+    test_planner_related_tests_chars: int
+    test_planner_import_context_chars: int
+    test_planner_inferred_symbols_chars: int
+    test_insert_after_example_chars: int
+    test_insert_after_import_context_chars: int
+    test_insert_after_inferred_symbols_chars: int
+    test_insert_after_request_chars: int
+    test_soft_overflow_chars: int
 
 
 @dataclass(slots=True)
@@ -126,7 +139,8 @@ class RuntimeConfig:
 
     test_prompt_related_tests_truncate_chars: int
     test_prompt_full_file_truncate_chars: int
-    test_prompt_target_truncate_chars: int    
+    test_prompt_target_truncate_chars: int
+    test_prompt_reference_chars: int
     trace: TraceSettings
     prompt_budget: PromptBudgetSettings
     budget_strategy: BudgetStrategySettings
@@ -264,6 +278,7 @@ def load_config(config_path: str | Path | None = None) -> RuntimeConfig:
         test_prompt_related_tests_truncate_chars=int(generation_cfg.get('test_prompt_related_tests_truncate_chars', 160)),
         test_prompt_full_file_truncate_chars=int(generation_cfg.get('test_prompt_full_file_truncate_chars', 260)),
         test_prompt_target_truncate_chars=int(generation_cfg.get('test_prompt_target_truncate_chars', 220)),
+        test_prompt_reference_chars=int(generation_cfg.get('test_prompt_reference_chars', 420)),
 
         trace=TraceSettings(
             save_to_file=bool(trace_cfg.get('save_to_file', True)),
@@ -283,7 +298,7 @@ def load_config(config_path: str | Path | None = None) -> RuntimeConfig:
             generate_related_tests_keep=int(budget_strategy_cfg.get('generate_related_tests_keep', 1)),
             generate_related_test_source_limit=int(budget_strategy_cfg.get('generate_related_test_source_limit', 450)),
             generate_target_source_limit=int(budget_strategy_cfg.get('generate_target_source_limit', 1400)),
-            generate_test_drop_reference=bool(budget_strategy_cfg.get('generate_test_drop_reference', True)),
+            generate_test_drop_reference=bool(budget_strategy_cfg.get('generate_test_drop_reference', False)),
             generate_test_module_outline_keep=int(budget_strategy_cfg.get('generate_test_module_outline_keep', 2)),
             generate_test_related_tests_keep=int(budget_strategy_cfg.get('generate_test_related_tests_keep', 1)),
             generate_test_related_test_source_limit=int(budget_strategy_cfg.get('generate_test_related_test_source_limit', 500)),
@@ -317,6 +332,19 @@ def load_config(config_path: str | Path | None = None) -> RuntimeConfig:
             test_example_trim_second_chars=int(prompt_assembly_cfg.get('test_example_trim_second_chars', 320)),
             test_target_trim_final_chars=int(prompt_assembly_cfg.get('test_target_trim_final_chars', 520)),
             test_example_trim_final_chars=int(prompt_assembly_cfg.get('test_example_trim_final_chars', 160)),
+            test_reference_max_items=int(prompt_assembly_cfg.get('test_reference_max_items', 1)),
+            test_planner_related_tests_max_items=int(prompt_assembly_cfg.get('test_planner_related_tests_max_items', 1)),
+            test_planner_related_tests_per_item_chars=int(prompt_assembly_cfg.get('test_planner_related_tests_per_item_chars', 450)),
+            test_planner_inferred_symbols_count=int(prompt_assembly_cfg.get('test_planner_inferred_symbols_count', 20)),
+            test_planner_full_file_chars=int(prompt_assembly_cfg.get('test_planner_full_file_chars', 900)),
+            test_planner_related_tests_chars=int(prompt_assembly_cfg.get('test_planner_related_tests_chars', 450)),
+            test_planner_import_context_chars=int(prompt_assembly_cfg.get('test_planner_import_context_chars', 500)),
+            test_planner_inferred_symbols_chars=int(prompt_assembly_cfg.get('test_planner_inferred_symbols_chars', 300)),
+            test_insert_after_example_chars=int(prompt_assembly_cfg.get('test_insert_after_example_chars', 260)),
+            test_insert_after_import_context_chars=int(prompt_assembly_cfg.get('test_insert_after_import_context_chars', 220)),
+            test_insert_after_inferred_symbols_chars=int(prompt_assembly_cfg.get('test_insert_after_inferred_symbols_chars', 120)),
+            test_insert_after_request_chars=int(prompt_assembly_cfg.get('test_insert_after_request_chars', 180)),
+            test_soft_overflow_chars=int(prompt_assembly_cfg.get('test_soft_overflow_chars', 350)),
         ),
         config_path=str(path),
     )

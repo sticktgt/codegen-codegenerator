@@ -761,10 +761,13 @@ def generate_test(request: GenerationRequest, config_path: str) -> GenerationRes
             sorted((request.generated_code_artifact or {}).keys()),
         )
         logger.info(
-            "generate_test related context request_id=%s related_tests_count=%s related_test_chars=%s example_included=%s example_chars=%s trim_applied=%s",
+            "generate_test related context request_id=%s related_tests_count=%s related_test_chars=%s reference_count=%s reference_chars=%s has_reference=%s example_included=%s example_chars=%s trim_applied=%s",
             request.request_id,
             test_context_metrics.get("test_related_tests_count"),
             test_context_metrics.get("test_related_test_chars"),
+            test_context_metrics.get("test_reference_count"),
+            test_context_metrics.get("test_reference_chars"),
+            test_context_metrics.get("test_has_reference_context"),
             test_context_metrics.get("test_example_included"),
             test_context_metrics.get("test_example_chars"),
             test_context_metrics.get("test_trim_applied"),
@@ -790,10 +793,12 @@ def generate_test(request: GenerationRequest, config_path: str) -> GenerationRes
             test_context_metrics.get("test_target_source_origin"),
         )
         logger.info(
-            "generate_test prompt composition request_id=%s related_tests_count=%s related_test_chars=%s",
+            "generate_test prompt composition request_id=%s related_tests_count=%s related_test_chars=%s reference_count=%s reference_chars=%s",
             request.request_id,
             test_context_metrics.get("test_related_tests_count"),
             test_context_metrics.get("test_related_test_chars"),
+            test_context_metrics.get("test_reference_count"),
+            test_context_metrics.get("test_reference_chars"),
         )
 
         _log_prompt_size(
