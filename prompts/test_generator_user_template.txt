@@ -15,6 +15,7 @@
 - Верни самодостаточный pytest-файл со всеми необходимыми import.
 - Импортируй тестируемый symbol из target_file и используй target_symbol.
 - Для operation=insert_after_symbol target_symbol уже указывает на новый symbol, который нужно тестировать; не строй тест вокруг anchor-symbol.
+- Если insert_scope=class_body, target_symbol указывает на новый метод класса: импортируй parent class, создай экземпляр и вызывай метод через этот экземпляр; не импортируй метод как top-level function.
 - Если target_symbol указывает на class, импортируй и тестируй этот class.
 - Если target_symbol указывает на function, импортируй и тестируй эту function.
 - Используй только те классы, функции, поля, атрибуты, пути импорта и аргументы конструктора, которые явно видны в доступном проектном контексте.
@@ -27,6 +28,7 @@
 - Импортируй pytest только если он реально используется; если используется pytest.raises или pytest.*, обязательно добавь import pytest.
 - Для bool-результата используй только `assert expression` или `assert not expression`; не используй сравнения с True или False.
 - Тест должен проходить pytest и не содержать очевидных проблем с import.
+- Ожидаемые имена symbols, параметры и строки результата бери из исходного запроса и explicit requirements. Если generated target-код противоречит этим требованиям, не подменяй требования поведением generated code.
 - Не придумывай поведение, которого нет в target-коде, связанных тестах, полном исходнике файла или явных требованиях.
 - Для dataclass без собственной логики по умолчанию достаточно одного узкого позитивного теста на создание экземпляра и значения полей.
 - Негативные тесты добавляй только если они прямо следуют из переданного контекста.
@@ -40,13 +42,16 @@
 
 Параметры задачи:
 - operation: {operation}
+- insert_scope: {insert_scope}
+- expected_new_symbol_kind: {expected_new_symbol_kind}
+- parent_qualname: {parent_qualname}
 - target_file: {target_file}
 - target_symbol: {target_symbol}
 - effective_target_kind: {effective_target_kind}
 - effective_target_name: {effective_target_name}
 - generated_test_file: {generated_test_file}
 
-Запрос пользователя:
+Запрос пользователя и явные требования:
 {request}
 
 {test_plan_block}

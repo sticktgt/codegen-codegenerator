@@ -6,12 +6,22 @@
 - Все текстовые значения JSON пиши на русском языке.
 - Для замены существующего symbol используй только "replace_symbol".
 - Для вставки нового symbol после anchor-symbol используй только "insert_after_symbol".
+- Поля insert_scope, expected_new_symbol_kind, parent_qualname обязательны для insert_after_symbol.
+- Всегда возвращай import_changes как JSON-массив; если новые imports не нужны, верни [].
+- Не добавляй import-строки внутрь поля code.
+- Если сгенерированный code использует имя, которого нет среди существующих imports или definitions целевого файла, верни нужный import в import_changes. Это относится к именам в теле функции, type annotations, default values, decorators, context managers и helper calls.
+- Не полагайся на from __future__ import annotations как причину пропустить import для явно использованного annotation type. Если используешь внешний тип в сигнатуре, добавь import_changes.
+- Используй только imports, реально необходимые для сгенерированного code. Не добавляй запасные imports.
+- Пример add_from_import: {{"action": "add_from_import", "module": "pathlib", "names": ["Path"]}}.
+- Пример add_import: {{"action": "add_import", "module": "json"}}.
 - Меняй только указанный target.
 - Не добавляй внешние зависимости.
 - Не делай лишний рефакторинг.
 - Сохраняй стиль существующего кода.
-- Строго следуй запросу пользователя и planner_json.
+- Строго следуй исходному запросу пользователя, explicit_requirements и planner_json.
 - Не придумывай новые сущности, import path, поля, методы, параметры и архитектуру без опоры на контекст.
+- Если пользователь явно указал имя метода, функции, класса, параметра, поля или формат строки результата, используй это значение буквально; не заменяй его похожим или более удобным именем.
+- Reference artifacts и planner intent не имеют приоритета над явно указанными именами, сигнатурами и литералами из пользовательского запроса.
 - Сначала опирайся на код проекта. Reference artifacts используй только как вторичный ориентир.
 - Перед возвратом ответа проверь, что поле code само по себе является валидным Python-кодом для данного symbol.
 - Если изменяешь строковое выражение, вся итоговая текстовая пунктуация должна находиться внутри строкового литерала или f-строки; после завершения выражения не должно оставаться лишних символов.
@@ -20,13 +30,23 @@
 - Верни полный обновленный код существующего symbol.
 - Не меняй внешний контракт без явного требования.
 
-Правила для insert_after_symbol:
-- Верни только полный код нового symbol.
+Правила для insert_after_symbol при insert_scope=module_body:
+- Верни только полный код нового top-level function или class.
 - Поле insert_after заполни anchor qualname.
 - Не меняй код anchor-symbol.
 - Поле code должно начинаться сразу с class или def.
-- Не добавляй import в code.
+- Не добавляй import в code; если нужны imports, верни import_changes.
 - Если новый class или function без docstring, добавь короткий docstring на русском языке.
+
+Правила для insert_after_symbol при insert_scope=class_body:
+- Верни только код нового метода класса parent_qualname.
+- Не возвращай class целиком.
+- Не возвращай top-level function.
+- Поле code должно начинаться с def или async def; внешний отступ класса можно не добавлять.
+- Используй self, если метод обращается к состоянию класса.
+- Не меняй существующие методы и anchor-symbol.
+- Если новый method без docstring, добавь короткий docstring на русском языке.
+- Если нужны imports в файле, верни import_changes, а не import-строки в code.
 
 Дополнительные семантические правила:
 - Если пользователь просит dataclass-модель или dataclass-сущность, новый class обязан быть dataclass.
@@ -35,6 +55,9 @@
 
 Параметры задачи:
 - operation: {operation}
+- insert_scope: {insert_scope}
+- expected_new_symbol_kind: {expected_new_symbol_kind}
+- parent_qualname: {parent_qualname}
 - target_file: {target_file}
 - target_symbol: {target_symbol}
 - insert_after: {insert_after}
@@ -43,6 +66,6 @@
 Planner:
 {planner_json}
 
-Запрос пользователя:
+Запрос пользователя и явные требования:
 {request}
 {module_outline_block}{target_function_block}{full_file_source_block}{related_tests_block}{reference_function_block}

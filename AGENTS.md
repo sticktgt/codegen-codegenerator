@@ -1,163 +1,372 @@
-# Репозиторий codegenerator
+# Инструкции для агента: репозиторий codegenerator
 
-## Назначение
-`codegenerator` — внешний генератор для `codecollector`.
+## Назначение проекта
 
-Он принимает структурированный request, собирает prompt, вызывает модель через Ollama-compatible endpoint и возвращает нормализованный результат генерации в машиночитаемом виде.
+`codegenerator` — внешний генератор для `codecollector`. Он принимает структурированный request, собирает prompt, вызывает модель через Ollama-compatible endpoint и возвращает нормализованный JSON-результат.
 
 Поддерживаемые режимы:
+
 - `generate` — генерация production-кода;
-- `generate-test` — генерация теста;
+- `generate-test` — генерация тестового файла;
 - `repair` — исправление ранее сгенерированного артефакта.
 
-## Что важно сохранять
-- Предсказуемый CLI и стабильный JSON-контракт.
-- Простую и прозрачную сборку prompt.
-- Явное разделение режимов `generate`, `generate-test` и `repair`.
-- Отдельную ответственность `codegenerator` и `codecollector`.
-- Понятные trace-артефакты и полезное логирование.
+`codegenerator` не выбирает target, не применяет patch и не запускает проверки проекта. Это делает `codecollector`.
+
+---
 
 ## Границы ответственности
-### Что делает `codegenerator`
-- принимает `GenerationRequest` или `RepairRequest`;
-- применяет runtime budget strategy;
-- собирает prompt для нужного режима;
-- вызывает модель через Ollama-compatible endpoint;
-- разбирает ответ модели;
-- нормализует `code_artifact` или `test_artifact`;
-- возвращает `GenerationResult`;
-- сохраняет trace, prompt и usage-метрики.
 
-### Что не делает `codegenerator`
-- не индексирует проект;
-- не выбирает target в кодовой базе;
-- не строит граф связей проекта;
-- не применяет patch в проект;
-- не запускает project verification.
+### Делает codegenerator
 
-Это зона ответственности `codecollector`. Не переносить туда-сюда эти обязанности без явной причины.
+- Загружает `GenerationRequest` и `RepairRequest`.
+- Применяет runtime budget strategy.
+- Собирает prompt из переданного context.
+- Вызывает LLM.
+- Парсит и нормализует ответ модели.
+- Возвращает `GenerationResult`.
+- Пишет trace и usage-метрики.
+
+### Не делает codegenerator
+
+- Не индексирует проект.
+- Не выбирает target в проекте.
+- Не строит граф связей проекта.
+- Не применяет patch.
+- Не применяет `import_changes` к файлам.
+- Не запускает compile, pytest или другие проверки проекта.
+- Не определяет финальный статус run.
+
+Не переносить эти обязанности из `codecollector` в `codegenerator` без явной архитектурной причины.
+
+---
+
+## Основные файлы
+
+- `config.yaml` — конфигурация моделей, prompt templates, trace и budget.
+- `prompts/` — шаблоны prompt-ов.
+- `codegenerator/models/` — модели request/result/artifact.
+- `codegenerator/orchestration/` — реализация режимов `generate`, `generate-test`, `repair`.
+- `codegenerator/prompts/` — сборка prompt.
+- `codegenerator/generation/` — parsing и normalization результатов.
+- `codegenerator/llm/` — клиент Ollama-compatible endpoint.
+- `runs/` — trace-файлы вызовов модели.
+
+---
+
+## JSON-контракт
+
+Сохраняй стабильный JSON-контракт CLI.
+
+### GenerationRequest
+
+Используется в `generate` и `generate-test`.
+
+Важные поля:
+
+- `request_id`;
+- `mode`;
+- `change_request`;
+- `target`;
+- `project_context`;
+- `reference_context`;
+- `generated_code_artifact`;
+- `options`.
+
+### RepairRequest
+
+Используется в `repair`.
+
+Важные поля:
+
+- `request_id`;
+- `mode`;
+- `previous_generation_request_id`;
+- `change_request`;
+- `target`;
+- `error_context`;
+- `previous_artifact`;
+- `project_context`;
+- `reference_context`;
+- `options`.
+
+Поле `target` в `RepairRequest` поддерживается и должно оставаться совместимым.
+
+### GenerationResult
+
+Во всех режимах возвращается единый формат:
+
+- `request_id`;
+- `status`;
+- `code_artifact`;
+- `test_artifact`;
+- `planner_result`;
+- `test_planner_result`;
+- `warnings`;
+- `trace_path`;
+- `llm_usage`;
+- `error_type`;
+- `message`.
+
+---
+
+## CodeArtifact
+
+`code_artifact` описывает production-изменение.
+
+Ключевые поля:
+
+- `operation`;
+- `target_qualname`;
+- `target_file`;
+- `code`;
+- `insert_after`;
+- `insert_scope`;
+- `expected_new_symbol_kind`;
+- `parent_qualname`;
+- `import_changes`.
+
+### import_changes
+
+`import_changes` — часть production artifact.
+
+LLM должна возвращать imports в `import_changes`, если generated code использует новые внешние имена.
+
+Не добавляй import-строки внутрь `code_artifact.code`.
+
+Поддерживаемые формы:
+
+```json
+{
+  "action": "add_from_import",
+  "module": "pathlib",
+  "names": ["Path"]
+}
+```
+
+```json
+{
+  "action": "add_import",
+  "module": "json"
+}
+```
+
+Важно: если имя используется в type annotation, default value, decorator, context manager, helper call или теле функции, оно также требует import, если его нет в target-файле.
+
+`from __future__ import annotations` не является причиной пропускать import для явно использованного annotation type.
+
+---
+
+## Поддерживаемые операции
+
+### replace_symbol
+
+Заменяет существующий symbol.
+
+Правила:
+
+- вернуть полный обновленный код symbol;
+- не менять внешний контракт без явного требования;
+- `insert_scope` не применяется;
+- `import_changes` можно вернуть, если новая реализация требует imports.
+
+### insert_after_symbol + module_body
+
+Добавляет top-level function или class после anchor.
+
+Правила:
+
+- вернуть только новый top-level symbol;
+- `code` начинается с `def`, `async def` или `class`;
+- `insert_after` указывает anchor;
+- imports идут в `import_changes`, не в `code`.
+
+### insert_after_symbol + class_body
+
+Добавляет метод в существующий class.
+
+Правила:
+
+- вернуть только новый метод;
+- `code` начинается с `def` или `async def`;
+- не возвращать class целиком;
+- `parent_qualname` указывает родительский class;
+- `expected_new_symbol_kind` обычно равен `method`;
+- imports идут в `import_changes`, не в `code`.
+
+---
 
 ## Prompt templates
-Шаблоны prompt-ов должны:
-- быть на русском языке;
-- описывать только текущий способ работы;
-- не содержать дублирующих или конфликтующих инструкций;
-- не быть подогнанными под один demo-case;
-- быть пригодными для повторного использования в разных проектах.
 
-### Общие требования к шаблонам
-- Не зашивать в шаблоны константы конкретного проекта, если это можно передать через request.
-- Не дублировать длинные блоки правил в нескольких шаблонах без необходимости.
-- Не разносить одну тему по нескольким несогласованным местам.
-- При правках сохранять читаемость: одно правило должно быть описано один раз и понятным языком.
+Prompt templates должны быть на русском языке и описывать только текущий контракт.
 
-### Что особенно важно для `generate-test`
-- Сначала опираться на реальный project context.
-- `generated_code_artifact` использовать как основной источник измененного production-кода, если он передан.
-- `related_tests` считать основным источником стиля и паттернов тестов проекта.
-- reference artifacts использовать как дополнительную опору для стиля и паттернов, если они переданы в request и помещаются в budget.
-- `example_test_source` использовать только как дополнительную fallback-опору.
-- Не превращать test prompt в набор частных эвристик под один проблемный кейс.
+### Общие правила
 
-## Работа с контекстом
-`codegenerator` отвечает именно за runtime budget и фактическую сборку prompt из уже переданных блоков.
+- Не добавлять инструкции под один demo-case.
+- Не хранить проектные знания в шаблонах.
+- Не дублировать длинные правила без необходимости.
+- Не зашивать в Python-код большие части prompt.
+- Все изменяемые инструкции должны жить в `prompts/`.
+- JSON-примеры в шаблонах нужно экранировать как `{{` и `}}`, потому что шаблоны рендерятся через Python `.format(...)`.
 
-Что важно сохранять:
-- простую стратегию урезания контекста;
-- понятный приоритет блоков;
-- воспроизводимость результата при одинаковом request;
-- отсутствие скрытых специальных случаев под конкретный demo-проект.
+### Приоритеты для coder prompt
 
-Важно различать:
-- общий budget режима;
-- внутренние лимиты prompt assembly.
-- отдельные лимиты и правила для reference artifacts в `generate`, `generate-test` и `repair`.
+Coder prompt должен следовать такому приоритету:
 
-Это разные механизмы, и в документации их нельзя описывать как одно и то же.
+1. исходный пользовательский запрос;
+2. `explicit_requirements`;
+3. `preserve_literals`;
+4. `planner_json`;
+5. target и project context;
+6. related tests;
+7. reference artifacts.
 
-Не нужно усложнять trimming ради одной ошибки, если это делает поведение менее понятным для остальных сценариев.
+Reference artifacts не имеют приоритета над явно указанными пользователем именами, сигнатурами, параметрами и форматами строк.
 
-## Генерация тестов
-Цель test generation — получить полезный тест, который:
-- использует реальные символы и контракты проекта;
-- не придумывает поля, сигнатуры и зависимости;
-- не подменяет project context общим шаблоном;
-- по возможности повторяет паттерны существующих тестов.
+### explicit_requirements
 
-Важно:
-- не считать `example_test_source` заменой проектным тестам;
-- не считать generated test гарантированно корректным только потому, что он синтаксически валиден;
-- не добавлять в prompt чрезмерно узкие инструкции, которые чинят один кейс и портят другие.
+`explicit_requirements` — список требований, которые прямо следуют из пользовательского запроса.
+
+Пример:
+
+```json
+[
+  "Метод должен называться export_ticket_ids",
+  "Метод должен принимать параметр path: Path",
+  "Метод должен записывать id всех тикетов в файл path",
+  "По одному id на строку"
+]
+```
+
+### preserve_literals
+
+`preserve_literals` — только значения, буквально написанные пользователем в title, description или constraints.
+
+Не добавлять в `preserve_literals` фрагменты старого кода, target source, related tests, planner wording или reference artifacts, если пользователь не написал эти значения явно.
+
+Если пользователь просит изменить текст или формат, не сохранять старое значение из текущего кода как `preserve_literals`.
+
+---
+
+## Generate-test
+
+`generate-test` создает новый тестовый файл.
+
+Правила:
+
+- все imports теста включаются прямо в `test_artifact.source_code`;
+- `generated_code_artifact` является основным источником нового production-кода;
+- related tests являются основным источником стиля тестов проекта;
+- full file source и imports target-файла помогают не придумывать сигнатуры;
+- reference artifacts используются только как дополнительный контекст;
+- если `insert_scope=class_body`, тест импортирует parent class и вызывает method через экземпляр;
+- test prompt не должен строить тест вокруг anchor вместо нового symbol.
+
+Не добавлять `import_changes` для нового test file в текущем основном сценарии.
+
+---
 
 ## Repair
-`repair` должен оставаться отдельным режимом с отдельным prompt.
 
-Что важно:
-- repair получает причину сбоя из `RepairRequest`;
-- repair должен исправлять артефакт, а не изобретать новый сценарий изменения;
-- результат repair должен оставаться в том же внешнем контракте, что и обычная генерация.
+`repair` исправляет предыдущий артефакт после ошибки.
 
-Если меняется логика подготовки repair prompt, это должно быть отражено в логах и trace так, чтобы можно было понять:
-- что именно считалось ошибкой;
-- какие failed blocks были переданы;
-- какой предыдущий артефакт исправлялся.
+Правила:
 
-## Логирование и диагностика
-Логи и trace должны помогать разбирать реальные ошибки генерации.
+- repair получает `error_context` и `previous_artifact`;
+- repair сохраняет operation, insert scope и parent class;
+- repair не должен менять смысл пользовательского запроса;
+- repair возвращает результат в том же формате `GenerationResult`.
 
-Минимум полезной информации:
-- какой режим вызван;
-- какой request загружен;
-- какие контекстные блоки реально вошли в prompt;
-- использовался ли `full_file_source`;
-- использовались ли `related_tests`;
-- использовался ли `generated_code_artifact`;
-- использовался ли `example_test_source`;
-- какие блоки были урезаны;
-- итоговые размеры prompt и usage-метрики модели.
+Если меняется структура `RepairRequest`, обновляй `codegenerator/models/requests.py`, README и AGENTS.
 
-## Контракт результата
-Нужно сохранять стабильный машиночитаемый результат.
+---
 
-В актуальном состоянии:
-- `generate` возвращает `code_artifact`;
-- `generate-test` возвращает `test_artifact`;
-- `repair` возвращает исправленный артефакт в том же общем формате `GenerationResult`.
+## Budget strategy
 
-Не менять форму результата без явной необходимости и без синхронного обновления документации в этом репозитории и в `codecollector`.
+Есть два уровня ограничений.
 
-## Документация
-Документация по `codegenerator` должна:
-- быть только на русском языке;
-- описывать только текущее состояние проекта;
-- быть понятной без знания истории изменений;
-- содержать актуальные примеры;
-- не повторять одну и ту же тему в разных местах;
-- быть удобной для агента, который будет вносить правки в проект.
+### Общий лимит режима
 
-Если меняется:
-- структура request;
-- логика prompt assembly;
-- правила budget strategy;
-- состав trace;
-- формат `GenerationResult`,
+Раздел `prompt_budget`:
 
-Если меняются effective лимиты prompt для режимов `generate`, `generate-test` или `repair`, нужно обновлять документацию так, чтобы было явно видно:
-- где задается общий лимит режима;
-- где задаются внутренние лимиты сборки prompt;
-- как эти два уровня ограничений соотносятся между собой на текущей конфигурации.
+- `generate_chars_limit`;
+- `generate_test_chars_limit`;
+- `repair_chars_limit`.
 
-то это должно быть отражено в README и, если нужно, в комментариях рядом с кодом.
+### Внутренние лимиты сборки
 
-## Что не надо делать
-- Не подгонять шаблоны под один кейс из demo-проекта.
-- Не усложнять prompt assembly ради одной локальной проблемы.
-- Не переносить проектные знания из `codecollector` в `codegenerator` без необходимости.
-- Не хранить проектно-зависимые константы в коде, если их можно передать через request или config.
-- Не делать скрытые special-case ветки, которые потом невозможно объяснить по логам.
+Разделы `generation` и `prompt_assembly`:
 
-## Практический ориентир для правок
-Хорошая правка в `codegenerator` обычно обладает тремя свойствами:
+- `coder_prompt_target_chars`;
+- `coder_prompt_hard_limit`;
+- `coder_max_full_file_chars`;
+- `coder_max_reference_chars`;
+- `test_prompt_reference_chars`;
+- `test_planner_full_file_chars`;
+- `test_planner_related_tests_chars`;
+- `test_planner_related_tests_per_item_chars`.
+
+Итоговый prompt зависит от обоих уровней. Если меняешь лимит, проверь trace: какие блоки сохранены, какие урезаны, какой итоговый prompt size.
+
+Не увеличивай лимиты только ради одной локальной ошибки, если проблему можно решить более точным prompt или структурой request.
+
+---
+
+## Trace и логирование
+
+Trace должен помогать агенту понять, что реально произошло.
+
+В trace важны:
+
+- request;
+- prompt;
+- raw output;
+- parsed output;
+- usage;
+- context metrics;
+- trim steps;
+- `import_changes_count`;
+- ошибки parsing/normalization.
+
+При разборе качества генерации всегда проверяй не только итоговый JSON, но и фактические prompt blocks, вошедшие в trace.
+
+---
+
+## Правила изменения проекта
+
+Перед правкой:
+
+1. Определи, меняешь prompt, normalization, request model или orchestration.
+2. Проверь, не относится ли задача к `codecollector`.
+3. Не переносить в `codegenerator` проверку project semantics.
+4. Не добавлять скрытые special cases.
+5. Не ломать CLI-контракт.
+
+После правки:
+
+1. Проверить `py_compile` измененных Python-файлов.
+2. Проверить хотя бы один `generate` или `generate-test` trace.
+3. Проверить, что prompt templates не содержат неэкранированные JSON-фигурные скобки.
+4. Обновить README, если изменилась структура request/result, prompt assembly, budget или trace.
+
+---
+
+## Что не делать
+
+- Не подгонять prompt под один конкретный пример.
+- Не добавлять project-specific константы в код.
+- Не дублировать одну тему в нескольких местах.
+- Не добавлять imports в `code_artifact.code`.
+- Не заставлять `codegenerator` применять patch или запускать pytest.
+- Не менять формат JSON без обновления интеграции с `codecollector`.
+
+---
+
+## Практический ориентир
+
+Хорошая правка в `codegenerator`:
+
 - улучшает воспроизводимость результата;
-- не ломает существующий CLI-контракт;
-- объяснима по логам и trace без чтения всей истории проекта.
+- объяснима по trace;
+- не ломает CLI и JSON-контракт;
+- не смешивает ответственность `codegenerator` и `codecollector`;
+- не ухудшает другие режимы ради одного случая.

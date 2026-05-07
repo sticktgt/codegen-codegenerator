@@ -169,26 +169,39 @@ def _compact_change_request_for_codegen(
     lines: list[str] = []
     if title:
         lines.append(f"Title: {title}")
+    if description:
+        description_short, _ = _truncate_text(description, 900)
+        lines.append("Description:")
+        lines.append(description_short)
+    if constraints:
+        lines.append("Request constraints:")
+        lines.extend(f"- {item}" for item in constraints[:8])
 
     if planner_result:
+        explicit_requirements = [
+            str(item).strip()
+            for item in (planner_result.get("explicit_requirements") or [])
+            if str(item).strip()
+        ]
+        preserve_literals = [
+            str(item).strip()
+            for item in (planner_result.get("preserve_literals") or [])
+            if str(item).strip()
+        ]
         intent_summary = str(planner_result.get("intent_summary", "") or "").strip()
+        planner_constraints = [str(item) for item in (planner_result.get("constraints") or []) if item]
+
+        if explicit_requirements:
+            lines.append("Explicit user requirements from planner:")
+            lines.extend(f"- {item}" for item in explicit_requirements[:10])
+        if preserve_literals:
+            lines.append("User-specified names, signatures and literals to preserve exactly:")
+            lines.extend(f"- {item}" for item in preserve_literals[:12])
         if intent_summary:
             lines.append(f"Planned intent: {intent_summary}")
-        planner_constraints = [str(item) for item in (planner_result.get("constraints") or []) if item]
         if planner_constraints:
             lines.append("Planner constraints:")
             lines.extend(f"- {item}" for item in planner_constraints[:8])
-        elif constraints:
-            lines.append("Request constraints:")
-            lines.extend(f"- {item}" for item in constraints[:6])
-    else:
-        if description:
-            description_short, _ = _truncate_text(description, 700)
-            lines.append("Description:")
-            lines.append(description_short)
-        if constraints:
-            lines.append("Constraints:")
-            lines.extend(f"- {item}" for item in constraints[:8])
 
     return "\n".join(lines).strip()
 
@@ -299,6 +312,9 @@ def build_test_planner_user_prompt(
         "target_file": request.target.get("file_path", ""),
         "target_symbol": effective_target_symbol,
         "operation": request.target.get("operation", "replace_symbol"),
+        "insert_scope": request.target.get("insert_scope") or "",
+        "expected_new_symbol_kind": request.target.get("expected_new_symbol_kind") or "",
+        "parent_qualname": request.target.get("parent_qualname") or "",
         "target_source": target_source or "none",
         "full_file_source": full_file_source or "none",
         "related_tests_block": _render_optional_block("Связанные тесты проекта", related_tests_text),
@@ -405,6 +421,9 @@ def build_planner_user_prompt(
         "target_file": request.target.get("file_path", ""),
         "target_symbol": request.target.get("qualname", ""),
         "operation": request.target.get("operation", "replace_symbol"),
+        "insert_scope": request.target.get("insert_scope") or "module_body",
+        "expected_new_symbol_kind": request.target.get("expected_new_symbol_kind") or "",
+        "parent_qualname": request.target.get("parent_qualname") or "",
         "insert_after": request.target.get("insert_after") or request.target.get("qualname", "") or "null",
         "reference_symbol": "null",
         "module_outline_block": _render_optional_block("Структура модуля", module_outline_text),
@@ -510,6 +529,9 @@ def build_coder_user_prompt(
     ) -> str:
         return template_text.format(
             operation=request.target.get("operation", "replace_symbol"),
+            insert_scope=request.target.get("insert_scope") or "module_body",
+            expected_new_symbol_kind=request.target.get("expected_new_symbol_kind") or "",
+            parent_qualname=request.target.get("parent_qualname") or "",
             target_file=request.target.get("file_path", ""),
             target_symbol=request.target.get("qualname", ""),
             insert_after=request.target.get("insert_after")
@@ -1075,6 +1097,19 @@ def _resolve_test_target_symbol(
     if not generated_symbol_name:
         return anchor_symbol, anchor_symbol or None
 
+    insert_scope = str(
+        artifact_payload.get("insert_scope")
+        or request.target.get("insert_scope")
+        or ""
+    ).strip()
+    parent_qualname = str(
+        artifact_payload.get("parent_qualname")
+        or request.target.get("parent_qualname")
+        or ""
+    ).strip()
+    if insert_scope == "class_body" and parent_qualname:
+        return f"{parent_qualname}.{generated_symbol_name}", anchor_symbol or None
+
     target_file = str(request.target.get("file_path", "") or "").strip()
     module_name = target_file[:-3].replace("/", ".") if target_file.endswith(".py") else ""
 
@@ -1140,6 +1175,9 @@ def _build_test_prompt_values(
     )
     return {
         "operation": request.target.get("operation", "replace_symbol"),
+        "insert_scope": request.target.get("insert_scope") or "",
+        "expected_new_symbol_kind": request.target.get("expected_new_symbol_kind") or "",
+        "parent_qualname": request.target.get("parent_qualname") or "",
         "target_file": request.target.get("file_path", ""),
         "target_symbol": effective_target_symbol,
         "effective_target_kind": effective_target_kind,
@@ -1211,6 +1249,7 @@ def build_test_generator_user_prompt(
     available_user_chars: int,
     generated_code_artifact: Any = None,
     test_plan: dict[str, Any] | None = None,
+    planner_result: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     pc = request.project_context or {}
     effective_test_plan = test_plan or request.test_plan or {}
@@ -1218,7 +1257,7 @@ def build_test_generator_user_prompt(
     target_symbol = pc.get("target_symbol") or {}
     compact_request_text = _compact_change_request_for_codegen(
         request.change_request,
-        planner_result=None,
+        planner_result=planner_result,
     )
     effective_target_symbol, anchor_symbol = _resolve_test_target_symbol(
         request,
@@ -1233,8 +1272,20 @@ def build_test_generator_user_prompt(
         target_source = str(target_symbol.get("source", "") or "").strip()
         target_source_origin = "project_context.target_symbol"
 
+    insert_scope = str(
+        artifact_payload.get("insert_scope")
+        or request.target.get("insert_scope")
+        or ""
+    ).strip()
+    expected_new_symbol_kind = str(
+        artifact_payload.get("expected_new_symbol_kind")
+        or request.target.get("expected_new_symbol_kind")
+        or ""
+    ).strip()
     stripped_target_source = target_source.strip()
-    if stripped_target_source.startswith("class ") or "\nclass " in stripped_target_source:
+    if insert_scope == "class_body" or expected_new_symbol_kind == "method":
+        effective_target_kind = "method"
+    elif stripped_target_source.startswith("class ") or "\nclass " in stripped_target_source:
         effective_target_kind = "class"
 
     effective_target_name = (

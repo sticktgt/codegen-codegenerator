@@ -39,6 +39,31 @@ def _strip_leading_imports_for_insert_after(code: str) -> str:
 
     return "\n".join(result).lstrip()
 
+
+def _normalize_import_changes(value) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    result: list[dict] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        action = str(item.get('action') or '').strip()
+        module = str(item.get('module') or '').strip()
+        if action not in {'add_import', 'add_from_import'} or not module:
+            continue
+        normalized = {'action': action, 'module': module}
+        if action == 'add_import':
+            alias = str(item.get('alias') or '').strip()
+            if alias:
+                normalized['alias'] = alias
+        else:
+            names = [str(name).strip() for name in (item.get('names') or []) if str(name).strip()]
+            if not names:
+                continue
+            normalized['names'] = names
+        result.append(normalized)
+    return result
+
 def parse_code_response(content: str) -> dict:
     parsed = normalize_code_fields(parse_llm_json(content))
     required = ['target_file', 'operation', 'code']
@@ -52,5 +77,10 @@ def parse_code_response(content: str) -> dict:
 
     if parsed['operation'] == 'insert_after_symbol':
         parsed['code'] = _strip_leading_imports_for_insert_after(str(parsed.get('code') or ''))
+
+    parsed['insert_scope'] = str(parsed.get('insert_scope') or '').strip() or None
+    parsed['expected_new_symbol_kind'] = str(parsed.get('expected_new_symbol_kind') or '').strip() or None
+    parsed['parent_qualname'] = str(parsed.get('parent_qualname') or '').strip() or None
+    parsed['import_changes'] = _normalize_import_changes(parsed.get('import_changes'))
 
     return parsed
