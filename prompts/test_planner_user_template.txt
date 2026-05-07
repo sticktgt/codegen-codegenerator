@@ -10,13 +10,18 @@
 
 Не придумывай отсутствующие import path, поля, методы, аргументы конструктора и атрибуты.
 Опирайся только на явно видимый контекст.
+Сохраняй явно указанные пользователем имена методов, функций, классов, параметров и форматы ожидаемого результата; не заменяй их именами из сгенерированного кода, если они противоречат запросу.
 План должен быть коротким и полезным именно для генерации одного тестового файла.
 Если operation=insert_after_symbol, target_symbol уже указывает на новый symbol для тестирования, а не на anchor-symbol.
+Если insert_scope=class_body, target_symbol указывает на новый метод; тест должен использовать parent class и вызывать метод через экземпляр.
 
-Change request:
+Change request and explicit requirements:
 {request}
 
 Operation: {operation}
+Insert scope: {insert_scope}
+Expected new symbol kind: {expected_new_symbol_kind}
+Parent qualname: {parent_qualname}
 Target file: {target_file}
 Target symbol: {target_symbol}
 

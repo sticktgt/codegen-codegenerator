@@ -9,6 +9,11 @@
 - intent_summary
 - constraints
 - reference_symbol
+- insert_scope
+- expected_new_symbol_kind
+- parent_qualname
+- explicit_requirements
+- preserve_literals
 
 Правила:
 - Не придумывай файлы и symbols.
@@ -21,9 +26,19 @@
 - Для замены существующего symbol используй только operation="replace_symbol".
 - Для вставки нового symbol после anchor-symbol используй только operation="insert_after_symbol".
 - Если requested operation=insert_after_symbol, поле target_symbol — это anchor-symbol, после которого должен быть добавлен новый symbol.
+- Для insert_scope используй только "module_body" или "class_body".
+- Если добавляется метод внутрь класса, используй insert_scope="class_body", expected_new_symbol_kind="method" и заполни parent_qualname.
+- Если добавляется top-level функция или класс, используй insert_scope="module_body".
+- В explicit_requirements сохрани только требования, которые прямо следуют из исходного пользовательского запроса: что нужно создать или изменить, явные имена symbols, сигнатуры, параметры, ожидаемые строки результата и явно заданное поведение.
+- В preserve_literals включай только значения, буквально написанные пользователем в Title, Description или Request constraints: имена symbols, сигнатуры, параметры, форматы строк, строки результата и другие литералы, которые нельзя переименовывать или переинтерпретировать.
+- Не добавляй в preserve_literals фрагменты старого кода, target source, related tests, planner wording или reference artifacts, если пользователь не написал эти значения явно.
+- Если пользователь просит изменить текст, строку, формат или поведение, не сохраняй старое значение из текущего кода как preserve_literals.
 
 Входные данные:
 Operation: {operation}
+Insert scope: {insert_scope}
+Expected new symbol kind: {expected_new_symbol_kind}
+Parent qualname: {parent_qualname}
 Target file: {target_file}
 Target symbol: {target_symbol}
 Insert after: {insert_after}

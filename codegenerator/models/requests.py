@@ -27,3 +27,4 @@ class RepairRequest(RequestBase):
     project_context: dict[str, Any]
     reference_context: dict[str, Any] = field(default_factory=dict)
     options: dict[str, Any] = field(default_factory=dict)
+    target: dict[str, Any] = field(default_factory=dict)

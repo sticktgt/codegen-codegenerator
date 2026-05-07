@@ -4,6 +4,7 @@
 
 Правила исправления:
 - Сохраняй requested operation из параметров задачи.
+- Сохраняй явно указанные пользователем имена методов, функций, классов, параметров и форматы строк результата.
 - Для замены существующего symbol используй только operation="replace_symbol".
 - Для вставки нового symbol после anchor-symbol используй только operation="insert_after_symbol".
 - Меняй только target_symbol в указанном target_file или вставляемый новый symbol для anchor.
@@ -23,6 +24,12 @@
 - Если новый class должен быть dataclass, исправь это напрямую.
 - Если запрос просит только модель данных, не добавляй лишнюю логику.
 - Reference context используй только как вторичный ориентир по стилю.
+- Всегда возвращай import_changes как JSON-массив; если новые imports не нужны, верни [].
+- Не добавляй import-строки внутрь поля code.
+- Если исправленный code использует имя, которого нет среди существующих imports или definitions целевого файла, верни нужный import в import_changes. Это относится к именам в теле функции, type annotations, default values, decorators, context managers и helper calls.
+- Не полагайся на from __future__ import annotations как причину пропустить import для явно использованного annotation type. Если используешь внешний тип в сигнатуре, добавь import_changes.
+- Пример add_from_import: {{"action": "add_from_import", "module": "pathlib", "names": ["Path"]}}.
+- Пример add_import: {{"action": "add_import", "module": "json"}}.
 
 Параметры задачи:
 - requested_operation: {requested_operation}

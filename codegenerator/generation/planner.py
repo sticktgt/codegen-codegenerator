@@ -20,6 +20,24 @@ def _normalize_operation(operation: str) -> str:
     }
     return mapping.get(value, value)
 
+
+
+def _normalize_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, list):
+        result: list[str] = []
+        for item in value:
+            text = str(item or '').strip()
+            if text:
+                result.append(text)
+        return result
+    text = str(value or '').strip()
+    return [text] if text else []
+
 def validate_planner_result(parsed: dict[str, Any]) -> dict[str, Any]:
     required=['operation','target_file','target_symbol','intent_summary','constraints']
     missing=[k for k in required if k not in parsed]
@@ -36,6 +54,9 @@ def validate_planner_result(parsed: dict[str, Any]) -> dict[str, Any]:
         )
 
     parsed.setdefault('reference_symbol', None)
+    parsed['constraints'] = _normalize_string_list(parsed.get('constraints'))
+    parsed['explicit_requirements'] = _normalize_string_list(parsed.get('explicit_requirements'))
+    parsed['preserve_literals'] = _normalize_string_list(parsed.get('preserve_literals'))
     return parsed
 
 def parse_planner_response(content: str) -> dict[str, Any]:
@@ -47,14 +68,9 @@ def validate_test_planner_result(parsed: dict[str, Any]) -> dict[str, Any]:
     if missing:
         raise ValueError(f"test planner result is missing required keys: {', '.join(missing)}")
 
-    if not isinstance(parsed.get('must_use_symbols'), list):
-        raise ValueError("test planner result field 'must_use_symbols' must be a JSON array")
-    if not isinstance(parsed.get('avoid'), list):
-        raise ValueError("test planner result field 'avoid' must be a JSON array")
-
-    parsed.setdefault('notes', [])
-    if not isinstance(parsed.get('notes'), list):
-        raise ValueError("test planner result field 'notes' must be a JSON array")
+    parsed['must_use_symbols'] = _normalize_string_list(parsed.get('must_use_symbols'))
+    parsed['avoid'] = _normalize_string_list(parsed.get('avoid'))
+    parsed['notes'] = _normalize_string_list(parsed.get('notes'))
 
     return parsed
 

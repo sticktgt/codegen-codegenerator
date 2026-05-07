@@ -277,6 +277,7 @@ def _canonicalize_code_result_for_request(
     parsed: dict[str, Any],
     expected_operation: str | None,
     target_qualname: str | None,
+    request_target: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     operation = str(parsed.get('operation', '') or '').strip().lower()
     expected = str(expected_operation or '').strip().lower()
@@ -287,8 +288,18 @@ def _canonicalize_code_result_for_request(
     if expected and operation != expected:
         raise ValueError(f'Generator returned operation {operation}, expected {expected}')
 
+    request_target = request_target or {}
     if operation == 'insert_after_symbol':
         parsed['insert_after'] = parsed.get('insert_after') or target_qualname
+
+    parsed['insert_scope'] = parsed.get('insert_scope') or request_target.get('insert_scope')
+    parsed['expected_new_symbol_kind'] = (
+        parsed.get('expected_new_symbol_kind')
+        or request_target.get('expected_new_symbol_kind')
+    )
+    parsed['parent_qualname'] = parsed.get('parent_qualname') or request_target.get('parent_qualname')
+    if not isinstance(parsed.get('import_changes'), list):
+        parsed['import_changes'] = []
 
     return parsed
 
@@ -299,6 +310,10 @@ def _build_generated_code_context(code_artifact: CodeArtifact) -> dict[str, Any]
         "target_file": code_artifact.target_file,
         "code": code_artifact.code,
         "insert_after": code_artifact.insert_after,
+        "insert_scope": code_artifact.insert_scope,
+        "expected_new_symbol_kind": code_artifact.expected_new_symbol_kind,
+        "parent_qualname": code_artifact.parent_qualname,
+        "import_changes": list(code_artifact.import_changes or []),
     }
 
 
@@ -450,6 +465,7 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
             code_result,
             request.target.get("operation"),
             request.target.get("qualname"),
+            request.target,
         )        
 
         code_artifact = CodeArtifact(
@@ -458,6 +474,10 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
             target_file=code_result["target_file"],
             code=code_result["code"],
             insert_after=code_result.get("insert_after"),
+            insert_scope=code_result.get("insert_scope"),
+            expected_new_symbol_kind=code_result.get("expected_new_symbol_kind"),
+            parent_qualname=code_result.get("parent_qualname"),
+            import_changes=list(code_result.get("import_changes") or []),
         )
 
         warnings: list[str] = []
@@ -534,6 +554,7 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
                 available_user_chars=available_user_chars,
                 generated_code_artifact=generated_code_context,
                 test_plan=test_request.test_plan,
+                planner_result=planner_result,
             )
 
             logger.info(
@@ -940,6 +961,7 @@ def repair(request: RepairRequest, config_path: str) -> GenerationResult:
             request.previous_artifact.get("insert_after")
             or request.previous_artifact.get("target_qualname")
             or request.previous_artifact.get("target_symbol"),
+            request.previous_artifact,
         )
 
         code_artifact = CodeArtifact(
@@ -951,6 +973,10 @@ def repair(request: RepairRequest, config_path: str) -> GenerationResult:
             target_file=repair_result["target_file"],
             code=repair_result["code"],
             insert_after=repair_result.get("insert_after"),
+            insert_scope=repair_result.get("insert_scope"),
+            expected_new_symbol_kind=repair_result.get("expected_new_symbol_kind"),
+            parent_qualname=repair_result.get("parent_qualname"),
+            import_changes=list(repair_result.get("import_changes") or []),
         )
 
         result = GenerationResult(
