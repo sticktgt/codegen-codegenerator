@@ -41,6 +41,7 @@ class PromptSettings:
     planner_user_template: str
     coder_user_template: str
     repair_user_template: str
+    repair_planner_user_template: str
     test_generator_user_template: str
     test_generator_example: str
     test_planner_user_template: str
@@ -117,6 +118,10 @@ class PromptAssemblySettings:
     test_insert_after_inferred_symbols_chars: int
     test_insert_after_request_chars: int
     test_soft_overflow_chars: int
+    allowed_api_surface_chars: int
+    generate_block_chars: dict[str, int]
+    repair_block_chars: dict[str, int]
+    test_generator_plan_fields: list[str]
 
 
 @dataclass(slots=True)
@@ -134,13 +139,19 @@ class RuntimeConfig:
     coder_max_reference_artifacts: int
     coder_max_reference_chars: int
     coder_max_full_file_chars: int
+    coder_max_contract_symbols: int
+    coder_max_contract_symbol_chars: int
     repair_prompt_hard_limit: int
     repair_max_reference_chars: int
+    repair_max_contract_symbols: int
+    repair_max_contract_symbol_chars: int
 
     test_prompt_related_tests_truncate_chars: int
     test_prompt_full_file_truncate_chars: int
     test_prompt_target_truncate_chars: int
     test_prompt_reference_chars: int
+    test_prompt_contract_symbols: int
+    test_prompt_contract_symbol_chars: int
     trace: TraceSettings
     prompt_budget: PromptBudgetSettings
     budget_strategy: BudgetStrategySettings
@@ -261,7 +272,7 @@ def load_config(config_path: str | Path | None = None) -> RuntimeConfig:
             test_generator_model=str(models_cfg.get('test_generator_model', 'qwen2.5-coder:7b-instruct')),
             repair_model=str(models_cfg.get('repair_model', models_cfg.get('coder_model', 'qwen2.5-coder:14b-instruct-q4_K_M'))),
         ),
-        prompts=PromptSettings(**{key: str(prompts_cfg.get(key, '')) for key in ['system_rules', 'planner_user_template', 'coder_user_template', 'repair_user_template', 'test_generator_user_template', 'test_generator_example', 'test_planner_user_template']}),
+        prompts=PromptSettings(**{key: str(prompts_cfg.get(key, '')) for key in ['system_rules', 'planner_user_template', 'coder_user_template', 'repair_user_template', 'repair_planner_user_template', 'test_generator_user_template', 'test_generator_example', 'test_planner_user_template']}),
         defaults_constraints=[str(item) for item in defaults_cfg.get('constraints', [])],
         repair_enabled=bool(generation_cfg.get('repair_enabled', True)),
         max_repair_attempts=int(generation_cfg.get('max_repair_attempts', 1)),
@@ -272,13 +283,19 @@ def load_config(config_path: str | Path | None = None) -> RuntimeConfig:
         coder_max_reference_artifacts=int(generation_cfg.get('coder_max_reference_artifacts', 1)),
         coder_max_reference_chars=int(generation_cfg.get('coder_max_reference_chars', 650)),
         coder_max_full_file_chars=int(generation_cfg.get('coder_max_full_file_chars', 0)),
+        coder_max_contract_symbols=int(generation_cfg.get('coder_max_contract_symbols', 3)),
+        coder_max_contract_symbol_chars=int(generation_cfg.get('coder_max_contract_symbol_chars', 700)),
         repair_prompt_hard_limit=int(generation_cfg.get('repair_prompt_hard_limit', 5750)),
         repair_max_reference_chars=int(generation_cfg.get('repair_max_reference_chars', 420)),
+        repair_max_contract_symbols=int(generation_cfg.get('repair_max_contract_symbols', 2)),
+        repair_max_contract_symbol_chars=int(generation_cfg.get('repair_max_contract_symbol_chars', 500)),
 
         test_prompt_related_tests_truncate_chars=int(generation_cfg.get('test_prompt_related_tests_truncate_chars', 160)),
         test_prompt_full_file_truncate_chars=int(generation_cfg.get('test_prompt_full_file_truncate_chars', 260)),
         test_prompt_target_truncate_chars=int(generation_cfg.get('test_prompt_target_truncate_chars', 220)),
         test_prompt_reference_chars=int(generation_cfg.get('test_prompt_reference_chars', 420)),
+        test_prompt_contract_symbols=int(generation_cfg.get('test_prompt_contract_symbols', 3)),
+        test_prompt_contract_symbol_chars=int(generation_cfg.get('test_prompt_contract_symbol_chars', 500)),
 
         trace=TraceSettings(
             save_to_file=bool(trace_cfg.get('save_to_file', True)),
@@ -345,6 +362,16 @@ def load_config(config_path: str | Path | None = None) -> RuntimeConfig:
             test_insert_after_inferred_symbols_chars=int(prompt_assembly_cfg.get('test_insert_after_inferred_symbols_chars', 120)),
             test_insert_after_request_chars=int(prompt_assembly_cfg.get('test_insert_after_request_chars', 180)),
             test_soft_overflow_chars=int(prompt_assembly_cfg.get('test_soft_overflow_chars', 350)),
+            allowed_api_surface_chars=int(prompt_assembly_cfg.get('allowed_api_surface_chars', 1600)),
+            generate_block_chars={
+                str(key): int(value)
+                for key, value in (prompt_assembly_cfg.get('generate_block_chars') or {}).items()
+            },
+            repair_block_chars={
+                str(key): int(value)
+                for key, value in (prompt_assembly_cfg.get('repair_block_chars') or {}).items()
+            },
+            test_generator_plan_fields=[str(item) for item in (prompt_assembly_cfg.get('test_generator_plan_fields') or [])],
         ),
         config_path=str(path),
     )

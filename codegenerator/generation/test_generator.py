@@ -3,8 +3,11 @@ from pathlib import Path
 from codegenerator.parsing.response_parser import parse_llm_json
 from codegenerator.models.requests import GenerationRequest
 
+
 def build_generated_test_filename(request: GenerationRequest) -> str:
     return f"tests/test_generated_{request.request_id.replace('-', '_')}.py"
+
+
 
 def parse_test_response(content: str, expected_test_file: str) -> dict:
     parsed = parse_llm_json(content)
@@ -30,6 +33,7 @@ def parse_test_response(content: str, expected_test_file: str) -> dict:
         "test_file": expected_test_file,
         "code": code,
     }
+
 
 def extract_test_function_names(code: str) -> list[str]:
     result: list[str] = []

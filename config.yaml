@@ -20,6 +20,7 @@ codegenerator:
     planner_user_template: "prompts/planner_user_template.txt"
     coder_user_template: "prompts/coder_user_template.txt"
     repair_user_template: "prompts/repair_user_template.txt"
+    repair_planner_user_template: "prompts/repair_planner_user_template.txt"
     test_generator_user_template: "prompts/test_generator_user_template.txt"
     test_generator_example: "prompts/test_example_pytest_raises.txt"
     test_planner_user_template: "prompts/test_planner_user_template.txt"
@@ -35,14 +36,20 @@ codegenerator:
     max_repair_attempts: 1
     test_generation_mode: "always"
     test_generator_max_example_tests: 1
-    coder_prompt_target_chars: 14000
-    coder_prompt_hard_limit: 14000
+    coder_prompt_target_chars: 18000
+    coder_prompt_hard_limit: 18000
     coder_max_reference_artifacts: 1
     coder_max_reference_chars: 1400
-    coder_max_full_file_chars: 1600
-    repair_prompt_hard_limit: 14000
+    coder_max_full_file_chars: 2200
+    coder_max_contract_symbols: 4
+    coder_max_contract_symbol_chars: 900
+    repair_prompt_hard_limit: 18000
     repair_max_reference_chars: 900
+    repair_max_contract_symbols: 4
+    repair_max_contract_symbol_chars: 700
     test_prompt_reference_chars: 900
+    test_prompt_contract_symbols: 4
+    test_prompt_contract_symbol_chars: 700
 
     test_prompt_related_tests_truncate_chars: 500
     test_prompt_full_file_truncate_chars: 700
@@ -62,13 +69,32 @@ codegenerator:
     output_dir: "runs"
 
   prompt_budget:
-    generate_chars_limit: 14000
-    generate_test_chars_limit: 14000
-    repair_chars_limit: 14000
+    generate_chars_limit: 18000
+    generate_test_chars_limit: 17000
+    repair_chars_limit: 18000
     min_user_prompt_chars: 500
     user_prompt_reserve_chars: 300
 
   prompt_assembly:
+    allowed_api_surface_chars: 2200
+    generate_block_chars:
+      module_outline: 1000
+      target_source: 1400
+      full_file: 2600
+      related_tests: 700
+      contract_context: 3600
+      allowed_api_surface: 2400
+      reference: 700
+      contract_attribute_requirements: 1800
+    repair_block_chars:
+      module_outline: 600
+      target_source: 900
+      full_file: 1000
+      previous_code: 1200
+      contract_context: 2800
+      allowed_api_surface: 2400
+      reference: 500
+      repair_problem: 2500
     test_reference_max_items: 1
     test_planner_related_tests_max_items: 1
     test_planner_related_tests_per_item_chars: 700
@@ -82,3 +108,8 @@ codegenerator:
     test_insert_after_inferred_symbols_chars: 120
     test_insert_after_request_chars: 180
     test_soft_overflow_chars: 500
+    test_generator_plan_fields:
+      - target_symbol
+      - test_intent
+      - must_use_symbols
+      - notes

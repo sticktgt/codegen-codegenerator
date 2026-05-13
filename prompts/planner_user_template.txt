@@ -16,6 +16,11 @@
 - preserve_literals
 
 Правила:
+- Если исходный запрос сформулирован шире, чем позволяет Allowed API Surface, не придумывай широкий метод вроде получения всех сущностей, общий идентификатор, агрегирующий literal или новый контракт. Выбери самый узкий безопасный видимый контракт и добавь необходимые параметры в новый symbol, либо верни status="not_enough_context".
+- Если Allowed API Surface передан, считай его главным источником разрешенных вызовов; не планируй вызовы, которых нет в этом блоке.
+- Если в контексте есть Required production contract calls, планируй обязательный вызов этих production-контрактов в новом code; не заменяй их ручной реализацией бизнес-логики.
+- Если видимый production contract принимает обязательный параметр, планируй этот параметр в сигнатуре нового symbol или бери его из явно видимого local context; не планируй placeholder literal.
+- Если строишь return_shape или explicit dict из результата production-контракта, используй только поля, явно видимые в contract/source context. Если нужных полей не видно, верни status="not_enough_context" или status="needs_planning".
 - Не придумывай файлы и symbols.
 - Используй только предоставленные target-данные.
 - Поле intent_summary должно быть коротким и конкретным.
@@ -49,10 +54,16 @@ Reference symbol: {reference_symbol}
 
 {module_outline_block}
 
+{allowed_api_surface_block}
+
+{visible_implementation_facts_block}
+
 {target_function_block}
 
 {full_file_source_block}
 
 {related_tests_block}
+
+{contract_context_block}
 
 {reference_function_block}

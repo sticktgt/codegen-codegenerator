@@ -3,6 +3,11 @@
 Верни только валидный JSON, соответствующий требуемому контракту.
 
 Правила исправления:
+- Если исправляешь недоступный широкий сценарий, не заменяй его другим неразрешенным широким методом; используй видимый параметризованный контракт и добавь обязательные параметры в сигнатуру нового symbol.
+- Если новый symbol объявлен как возвращающий dict, не возвращай напрямую объект/model/result из production-контракта с недиктовым типом; сформируй dict явно по видимым полям/атрибутам или используй явно видимый project helper.
+- Если ошибка проверки содержит `unknown_contract_result_attribute`, удали обращение к несуществующему полю результата и сформируй dict только по видимым полям из `contract_result_field_check.visible_return_fields`; если нужных полей нет, верни status="not_repairable".
+Если новый code вызывает метод у внедренной зависимости или поля объекта, например `self.<dependency>.<method>(...)`, этот метод должен быть явно видим в target source, module/full file context, related symbols или contract context. Не придумывай новые методы зависимостей по смыслу запроса; если нужного метода нет в контексте, используй видимый контракт или измени сигнатуру нового symbol.
+- Не считай доступ к `__dict__` безопасным способом превратить объект/model в dict. Если contract-функция возвращает объект, model или dataclass-like значение, формируй dict явно по видимым полям, атрибутам, constructor keyword names или явно видимому helper; используй `__dict__` только если project context прямо показывает, что этот тип его поддерживает.
 - Сохраняй requested operation из параметров задачи.
 - Сохраняй явно указанные пользователем имена методов, функций, классов, параметров и форматы строк результата.
 - Для замены существующего symbol используй только operation="replace_symbol".
@@ -28,6 +33,13 @@
 - Не добавляй import-строки внутрь поля code.
 - Если исправленный code использует имя, которого нет среди существующих imports или definitions целевого файла, верни нужный import в import_changes. Это относится к именам в теле функции, type annotations, default values, decorators, context managers и helper calls.
 - Не полагайся на from __future__ import annotations как причину пропустить import для явно использованного annotation type. Если используешь внешний тип в сигнатуре, добавь import_changes.
+- Если ошибка проверки указывает на нарушение сигнатуры связанного production-контракта, исправь именно вызов: передай обязательные аргументы согласно сигнатуре или выбери решение, которое не вызывает этот symbol некорректно.
+- Если в контексте есть Required production contract calls, исправленный code обязан вызвать эти production-контракты; не заменяй их ручной реализацией бизнес-логики.
+
+- Если передан блок Contract attribute requirements, используй его только как дополнительный структурный контекст о полях моделей и контрактов; не добавляй новые поля и не подменяй явно видимые поля alias-именами.
+- Если обязательный аргумент contract symbol нельзя получить из параметров нового symbol, локальных переменных, target context или явно видимого проектного контекста, не подставляй придуманный литерал-заглушку вроде общей строки или условного значения; вместо этого измени сигнатуру нового symbol так, чтобы нужный аргумент был передан вызывающим кодом, или выбери другой видимый контракт.
+Если contract context показывает существующий caller для того же production symbol, сначала адаптируй видимый calling pattern этого caller: перенеси необходимые параметры в новый symbol и передавай их в production call. Не заменяй такие параметры фиктивными константами, общими строками, None или агрегирующими значениями, если они не указаны пользователем явно.
+- Если ошибка проверки указывает на дубликат symbol или повтор существующего метода/функции, не возвращай этот же symbol повторно: создай новый symbol с уникальным именем, соответствующим исходному пользовательскому запросу.
 - Пример add_from_import: {{"action": "add_from_import", "module": "pathlib", "names": ["Path"]}}.
 - Пример add_import: {{"action": "add_import", "module": "json"}}.
 
@@ -38,4 +50,4 @@
 - insert_after: {insert_after}
 
 Исходный запрос пользователя:
-{request}{syntax_error_block}{previous_code_block}{target_function_block}{module_outline_block}{full_file_source_block}{reference_context_block}
+{request}{repair_problem_block}{syntax_error_block}{previous_code_block}{target_function_block}{contract_context_block}{required_contracts_block}{contract_attribute_requirements_block}{module_outline_block}{full_file_source_block}{reference_context_block}

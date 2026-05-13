@@ -24,12 +24,39 @@ def _sum_reference_chars(reference_artifacts: list[dict[str, Any]] | None) -> in
     return total
 
 
+def _get_contract_context(project_context: dict[str, Any]) -> dict[str, Any]:
+    contract_context = project_context.get("contract_context")
+    if not isinstance(contract_context, dict):
+        contract_context = {}
+        project_context["contract_context"] = contract_context
+    return contract_context
+
+
+def _get_related_symbols(project_context: dict[str, Any]) -> list[dict[str, Any]]:
+    contract_context = _get_contract_context(project_context)
+    related_symbols = contract_context.get("related_symbols")
+    if related_symbols is None:
+        related_symbols = project_context.get("related_symbols", [])
+    return [dict(item) for item in (related_symbols or [])]
+
+
+def _set_related_symbols(project_context: dict[str, Any], related_symbols: list[dict[str, Any]]) -> None:
+    contract_context = _get_contract_context(project_context)
+    contract_context["related_symbols"] = related_symbols
+    project_context["related_symbols"] = related_symbols
+
+
+def _related_symbol_chars(related_symbols: list[dict[str, Any]] | None) -> int:
+    return sum(len(str(item.get("source_excerpt", ""))) for item in related_symbols or [])
+
+
 def _context_metrics_from_request(request: dict[str, Any]) -> dict[str, Any]:
     project_context = request.get("project_context", {}) or {}
     reference_context = request.get("reference_context", {}) or {}
 
     target_symbol = project_context.get("target_symbol", {}) or {}
     related_tests = project_context.get("related_tests", []) or []
+    related_symbols = _get_related_symbols(project_context)
     reference_artifacts = reference_context.get("reference_artifacts", []) or []
 
     return {
@@ -37,6 +64,8 @@ def _context_metrics_from_request(request: dict[str, Any]) -> dict[str, Any]:
         "full_file_chars": len(str(project_context.get("full_file_source", ""))),
         "related_tests_count": len(related_tests),
         "related_test_chars": sum(len(str(t.get("source", ""))) for t in related_tests),
+        "related_symbols_count": len(related_symbols),
+        "related_symbol_chars": _related_symbol_chars(related_symbols),
         "reference_artifacts_count": len(reference_artifacts),
         "reference_chars": _sum_reference_chars(reference_artifacts),
     }
@@ -113,6 +142,45 @@ def _trim_related_tests(request: dict[str, Any], keep: int, source_limit: int, t
     project_context["related_tests"] = kept_items
 
 
+
+
+def _trim_related_symbols(request: dict[str, Any], keep: int, source_limit: int, trim_log: list[str]) -> None:
+    project_context = request.setdefault("project_context", {})
+    related_symbols = _get_related_symbols(project_context)
+    original_count = len(related_symbols)
+    original_chars = _related_symbol_chars(related_symbols)
+
+    if len(related_symbols) > keep:
+        trim_log.append(f"trimmed related_symbols count: {len(related_symbols)} -> {keep}")
+        related_symbols = related_symbols[:keep]
+
+    if keep <= 0:
+        if related_symbols:
+            trim_log.append(f"removed related_symbols: {len(related_symbols)} -> 0")
+        _set_related_symbols(project_context, [])
+        return
+
+    kept_items: list[dict[str, Any]] = []
+    for item in related_symbols:
+        new_item = dict(item)
+        source = str(new_item.get("source_excerpt", "") or "")
+        if source_limit <= 0:
+            new_item["source_excerpt"] = ""
+            new_item["truncated"] = True
+        else:
+            new_source, truncated = _truncate_text(source, source_limit)
+            new_item["source_excerpt"] = new_source
+            new_item["truncated"] = bool(new_item.get("truncated")) or truncated
+        kept_items.append(new_item)
+
+    after_chars = _related_symbol_chars(kept_items)
+    if original_count != len(kept_items) or after_chars != original_chars:
+        trim_log.append(
+            f"trimmed related_symbols context: count {original_count}->{len(kept_items)}, chars {original_chars}->{after_chars}, per_symbol_limit={source_limit}"
+        )
+    _set_related_symbols(project_context, kept_items)
+
+
 def _trim_target_source(request: dict[str, Any], source_limit: int, trim_log: list[str]) -> None:
     project_context = request.setdefault("project_context", {})
     target_symbol = project_context.setdefault("target_symbol", {})
@@ -174,6 +242,9 @@ def apply_budget_strategy(
         project_context["target_symbol"] = dict(project_context["target_symbol"] or {})
     if "related_tests" in project_context:
         project_context["related_tests"] = [dict(x) for x in (project_context.get("related_tests") or [])]
+    if "contract_context" in project_context:
+        project_context["contract_context"] = dict(project_context.get("contract_context") or {})
+    _set_related_symbols(project_context, _get_related_symbols(project_context))
     if "module_outline" in project_context:
         project_context["module_outline"] = list(project_context.get("module_outline") or [])
     if "reference_artifacts" in reference_context:
@@ -198,6 +269,12 @@ def apply_budget_strategy(
             source_limit=budget.generate_test_related_test_source_limit,
             trim_log=trim_log,
         )
+        _trim_related_symbols(
+            request,
+            keep=config.test_prompt_contract_symbols,
+            source_limit=config.test_prompt_contract_symbol_chars,
+            trim_log=trim_log,
+        )
         _trim_target_source(request, source_limit=budget.generate_test_target_source_limit, trim_log=trim_log)
 
     elif mode == "repair":
@@ -212,6 +289,12 @@ def apply_budget_strategy(
             source_limit=budget.repair_related_test_source_limit,
             trim_log=trim_log,
         )
+        _trim_related_symbols(
+            request,
+            keep=config.repair_max_contract_symbols,
+            source_limit=config.repair_max_contract_symbol_chars,
+            trim_log=trim_log,
+        )
         _trim_target_source(request, source_limit=budget.repair_target_source_limit, trim_log=trim_log)
 
     else:  # generate
@@ -220,6 +303,12 @@ def apply_budget_strategy(
             request,
             keep=budget.generate_related_tests_keep,
             source_limit=budget.generate_related_test_source_limit,
+            trim_log=trim_log,
+        )
+        _trim_related_symbols(
+            request,
+            keep=config.coder_max_contract_symbols,
+            source_limit=config.coder_max_contract_symbol_chars,
             trim_log=trim_log,
         )
         _trim_target_source(request, source_limit=budget.generate_target_source_limit, trim_log=trim_log)
