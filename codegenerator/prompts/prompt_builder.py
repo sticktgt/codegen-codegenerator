@@ -124,6 +124,346 @@ def _render_reference_artifacts(
     return rendered, metrics
 
 
+
+
+
+def _render_allowed_api_surface(
+    project_context: dict[str, Any],
+    max_chars: int = 1600,
+) -> tuple[str, dict[str, Any]]:
+    surface = project_context.get("allowed_api_surface") or {}
+    dependencies = list(surface.get("dependencies") or [])
+    free_functions = list(surface.get("free_functions") or [])
+
+    compact_dependencies: list[dict[str, Any]] = []
+    for dep in dependencies:
+        methods: list[dict[str, Any]] = []
+        for method in dep.get("allowed_methods") or []:
+            if isinstance(method, dict):
+                methods.append(
+                    {
+                        "name": method.get("name", ""),
+                        "signature": method.get("signature", ""),
+                        "qualname": method.get("qualname", ""),
+                    }
+                )
+        if methods:
+            compact_dependencies.append(
+                {
+                    "access_path": dep.get("access_path", ""),
+                    "type_name": dep.get("type_name", ""),
+                    "source": dep.get("source", ""),
+                    "allowed_methods": methods,
+                    "origin_examples": list(dep.get("origin_examples") or [])[:3],
+                }
+            )
+
+    compact_free_functions: list[dict[str, Any]] = []
+    for item in free_functions:
+        if isinstance(item, dict):
+            compact_free_functions.append(
+                {
+                    "name": item.get("name", ""),
+                    "signature": item.get("signature", ""),
+                    "qualname": item.get("qualname", ""),
+                    "origin_qualname": item.get("origin_qualname", ""),
+                }
+            )
+
+    if not compact_dependencies and not compact_free_functions:
+        return "none", {
+            "allowed_api_surface_dependencies": 0,
+            "allowed_api_surface_free_functions": 0,
+            "allowed_api_surface_chars": 0,
+            "allowed_api_surface_original_chars": 0,
+        }
+
+    rendered = _pretty({"dependencies": compact_dependencies, "free_functions": compact_free_functions})
+    original_chars = len(rendered)
+    if max_chars > 0 and len(rendered) > max_chars:
+        rendered, _ = _truncate_text(rendered, max_chars)
+
+    return rendered, {
+        "allowed_api_surface_dependencies": len(compact_dependencies),
+        "allowed_api_surface_free_functions": len(compact_free_functions),
+        "allowed_api_surface_chars": len(rendered),
+        "allowed_api_surface_original_chars": original_chars,
+    }
+
+
+def _call_display_name_from_prompt(func: Any) -> str:
+    import ast
+
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        parts = [func.attr]
+        value = func.value
+        while isinstance(value, ast.Attribute):
+            parts.append(value.attr)
+            value = value.value
+        if isinstance(value, ast.Name):
+            parts.append(value.id)
+        return ".".join(reversed(parts))
+    return ""
+
+
+def _visible_return_fields_from_contracts(project_context: dict[str, Any]) -> dict[str, list[str]]:
+    import ast
+
+    fields_by_type: dict[str, set[str]] = {}
+
+    for item in _contract_symbols_from_project_context(project_context):
+        source = str(item.get("source_excerpt") or item.get("source_code") or item.get("source") or "")
+        if not source:
+            continue
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            continue
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Return) and isinstance(node.value, ast.Call):
+                type_name = ""
+                if isinstance(node.value.func, ast.Name):
+                    type_name = node.value.func.id
+                elif isinstance(node.value.func, ast.Attribute):
+                    type_name = _call_display_name_from_prompt(node.value.func).rsplit(".", 1)[-1]
+                if not type_name:
+                    continue
+                fields = {kw.arg for kw in node.value.keywords if kw.arg}
+                if fields:
+                    fields_by_type.setdefault(type_name, set()).update(fields)
+
+        if str(item.get("kind") or "") == "class":
+            type_name = str(item.get("name") or item.get("qualname", "").rsplit(".", 1)[-1])
+            class_fields: set[str] = set()
+            for node in getattr(tree, "body", []):
+                if isinstance(node, ast.ClassDef):
+                    for child in node.body:
+                        if isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name):
+                            class_fields.add(child.target.id)
+                        elif isinstance(child, ast.Assign):
+                            for target in child.targets:
+                                if isinstance(target, ast.Name):
+                                    class_fields.add(target.id)
+            if type_name and class_fields:
+                fields_by_type.setdefault(type_name, set()).update(class_fields)
+
+    return {name: sorted(fields) for name, fields in fields_by_type.items()}
+
+
+def _render_visible_implementation_facts(
+    project_context: dict[str, Any],
+    max_chars: int = 1800,
+) -> tuple[str, dict[str, Any]]:
+    allowed_text, allowed_metrics = _render_allowed_api_surface(project_context, max_chars=max_chars)
+    required_contracts_text, required_contracts_metrics = _render_required_contracts(project_context, max_chars=max(600, max_chars // 2))
+    fields_by_type = _visible_return_fields_from_contracts(project_context)
+
+    facts: list[str] = []
+    if allowed_text and allowed_text != "none":
+        facts.append("Allowed calls:")
+        facts.append(allowed_text)
+
+    if required_contracts_text and required_contracts_text != "none":
+        facts.append("Required production contract calls (must be used by generated code):")
+        facts.append(required_contracts_text)
+
+    if fields_by_type:
+        facts.append("Visible return fields:")
+        for type_name, fields in fields_by_type.items():
+            facts.append(f"- {type_name}: {', '.join(fields)}")
+
+    rendered = "\n".join(facts) if facts else "none"
+    original_chars = len(rendered) if rendered != "none" else 0
+    if max_chars > 0 and rendered != "none" and len(rendered) > max_chars:
+        rendered, _ = _truncate_text(rendered, max_chars)
+
+    return rendered, {
+        **allowed_metrics,
+        **required_contracts_metrics,
+        "visible_implementation_facts_chars": len(rendered) if rendered != "none" else 0,
+        "visible_implementation_facts_original_chars": original_chars,
+        "visible_return_types": sorted(fields_by_type),
+    }
+
+
+def _required_project_imports_from_symbols(
+    project_context: dict[str, Any],
+    symbols: list[str],
+) -> list[str]:
+    symbol_names = {
+        str(symbol or "").strip().rsplit(".", 1)[-1]
+        for symbol in symbols
+        if str(symbol or "").strip()
+    }
+    if not symbol_names:
+        return []
+
+    imports: dict[str, set[str]] = {}
+    for item in _contract_symbols_from_project_context(project_context):
+        name = str(item.get("name") or item.get("qualname", "").rsplit(".", 1)[-1]).strip()
+        module_name = str(item.get("module_name") or "").strip()
+        if name in symbol_names and module_name:
+            imports.setdefault(module_name, set()).add(name)
+
+    return [
+        f"from {module_name} import {', '.join(sorted(imports[module_name]))}"
+        for module_name in sorted(imports)
+    ]
+
+
+def _block_limit(runtime_config: RuntimeConfig | None, group: str, key: str, default: int) -> int:
+    if runtime_config is None:
+        return default
+    limits = getattr(runtime_config.prompt_assembly, group, None) or {}
+    if isinstance(limits, dict):
+        return int(limits.get(key, default) or default)
+    return default
+
+def _contract_symbols_from_project_context(project_context: dict[str, Any]) -> list[dict[str, Any]]:
+    contract_context = project_context.get("contract_context") or {}
+    related_symbols = contract_context.get("related_symbols") or project_context.get("related_symbols") or []
+    return [dict(item) for item in related_symbols]
+
+
+def _render_contract_context(
+    project_context: dict[str, Any],
+    max_items: int,
+    per_item_chars: int,
+) -> tuple[str, dict[str, Any]]:
+    symbols = _contract_symbols_from_project_context(project_context)[:max(0, max_items)]
+    blocks: list[str] = []
+    total_chars = 0
+    qualnames: list[str] = []
+
+    for item in symbols:
+        source = str(item.get("source_excerpt", "") or "")
+        if per_item_chars > 0 and len(source) > per_item_chars:
+            source, _ = _truncate_text(source, per_item_chars)
+        qualname = str(item.get("qualname", "") or item.get("name", "") or "")
+        file_path = str(item.get("file_path", "") or "")
+        kind = str(item.get("kind", "") or "")
+        role = str(item.get("role", "") or "")
+        origin_qualname = str(item.get("origin_qualname", "") or "")
+        relation_kind = str(item.get("relation_kind", "") or "")
+        direction = str(item.get("relation_direction", "") or "")
+        confidence = str(item.get("relation_confidence", "") or "")
+        signature = str(item.get("signature", "") or "").strip()
+        docstring = str(item.get("docstring", "") or "").strip().replace("\n", " ")
+
+        lines = [
+            f"Qualname: {qualname}",
+            f"File: {file_path}",
+            f"Kind: {kind}",
+            f"Role: {role}",
+            f"Origin: {origin_qualname}" if origin_qualname else "Origin: target",
+            f"Relation: {direction}/{relation_kind}/{confidence}",
+        ]
+        if signature:
+            lines.append(f"Signature: {signature}")
+        if docstring:
+            lines.append(f"Docstring: {docstring[:180]}")
+        if source:
+            lines.append("Source excerpt:")
+            lines.append(source)
+            total_chars += len(source)
+        blocks.append("\n".join(lines))
+        qualnames.append(qualname)
+
+    rendered = "\n\n---\n\n".join(blocks) if blocks else "none"
+    metrics = {
+        "contract_symbols_count": len(blocks),
+        "contract_symbol_chars": total_chars,
+        "contract_symbol_qualnames": qualnames,
+    }
+    return rendered, metrics
+
+
+
+
+def _render_required_contracts(
+    project_context: dict[str, Any],
+    max_chars: int = 1000,
+) -> tuple[str, dict[str, Any]]:
+    contracts = project_context.get("required_contracts") or (
+        (project_context.get("contract_context") or {}).get("required_contracts")
+    ) or []
+    compact: list[dict[str, Any]] = []
+    for item in contracts:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        qualname = str(item.get("qualname") or "").strip()
+        if not name and qualname:
+            name = qualname.rsplit(".", 1)[-1]
+        if not name:
+            continue
+        compact.append({
+            "name": name,
+            "qualname": qualname,
+            "signature": str(item.get("signature") or ""),
+            "reason": str(item.get("reason") or ""),
+            "source": str(item.get("source") or ""),
+        })
+    if not compact:
+        return "none", {"required_contracts_count": 0, "required_contracts_chars": 0}
+    rendered = _pretty(compact)
+    original_chars = len(rendered)
+    if max_chars > 0 and len(rendered) > max_chars:
+        rendered, _ = _truncate_text(rendered, max_chars)
+    return rendered, {
+        "required_contracts_count": len(compact),
+        "required_contracts_chars": len(rendered),
+        "required_contracts_original_chars": original_chars,
+    }
+
+
+def _render_contract_attribute_requirements(
+    project_context: dict[str, Any],
+    max_chars: int = 1600,
+) -> tuple[str, dict[str, Any]]:
+    requirements = project_context.get("contract_attribute_requirements") or (
+        (project_context.get("contract_context") or {}).get("contract_attribute_requirements")
+    ) or []
+    compact: list[dict[str, Any]] = []
+    for item in requirements:
+        if not isinstance(item, dict):
+            continue
+        required_fields = [str(value) for value in (item.get("required_fields") or []) if str(value)]
+        if not required_fields:
+            continue
+        compact.append(
+            {
+                "contract_qualname": item.get("contract_qualname", ""),
+                "parameter": item.get("parameter", ""),
+                "item_type": item.get("item_type", ""),
+                "item_qualname": item.get("item_qualname", ""),
+                "required_fields": required_fields,
+                "model_fields": list(item.get("model_fields") or []),
+                "constructor_fields": list(item.get("constructor_fields") or []),
+                "required_constructor_fields": list(item.get("required_constructor_fields") or []),
+                "source": item.get("source", ""),
+            }
+        )
+
+    if not compact:
+        return "", {
+            "contract_attribute_requirements_count": 0,
+            "contract_attribute_requirements_chars": 0,
+            "contract_attribute_requirements_original_chars": 0,
+        }
+
+    rendered = _pretty(compact)
+    original_chars = len(rendered)
+    if max_chars > 0 and len(rendered) > max_chars:
+        rendered, _ = _truncate_text(rendered, max_chars)
+    return rendered, {
+        "contract_attribute_requirements_count": len(compact),
+        "contract_attribute_requirements_chars": len(rendered),
+        "contract_attribute_requirements_original_chars": original_chars,
+    }
 def _build_coder_prompt_metrics(
     prompt: str,
     target_text: str,
@@ -131,6 +471,7 @@ def _build_coder_prompt_metrics(
     full_file_text: str,
     reference_text: str,
     related_tests_text: str,
+    contract_context_text: str,
     before_trim: int,
     after_trim: int,
     trim_steps: list[str] | None = None,
@@ -139,6 +480,7 @@ def _build_coder_prompt_metrics(
     normalized_full_file = _normalize_optional_value(full_file_text)
     normalized_reference = _normalize_optional_value(reference_text)
     normalized_related_tests = _normalize_optional_value(related_tests_text)
+    normalized_contract_context = _normalize_optional_value(contract_context_text)
 
     return {
         "coder_prompt_chars_before_trim": before_trim,
@@ -148,6 +490,7 @@ def _build_coder_prompt_metrics(
         "coder_full_file_chars": len(normalized_full_file),
         "coder_reference_chars": len(normalized_reference),
         "coder_related_test_chars": len(normalized_related_tests),
+        "coder_contract_context_chars": len(normalized_contract_context),
         "coder_trim_steps": list(trim_steps or []),
     }
 
@@ -161,6 +504,8 @@ def _render_constraints_block(constraints: list[str], limit: int = 6) -> str:
 def _compact_change_request_for_codegen(
     change_request: dict[str, Any],
     planner_result: dict[str, Any] | None = None,
+    *,
+    forbidden_existing_symbol_names: set[str] | None = None,
 ) -> str:
     title = str(change_request.get("title", "") or "").strip()
     description = str(change_request.get("description", "") or "").strip()
@@ -178,18 +523,23 @@ def _compact_change_request_for_codegen(
         lines.extend(f"- {item}" for item in constraints[:8])
 
     if planner_result:
+        filtered_planner = _filter_planner_result_for_insert_after(
+            planner_result,
+            user_text="\n".join(lines),
+            forbidden_existing_symbol_names=forbidden_existing_symbol_names or set(),
+        )
         explicit_requirements = [
             str(item).strip()
-            for item in (planner_result.get("explicit_requirements") or [])
+            for item in (filtered_planner.get("explicit_requirements") or [])
             if str(item).strip()
         ]
         preserve_literals = [
             str(item).strip()
-            for item in (planner_result.get("preserve_literals") or [])
+            for item in (filtered_planner.get("preserve_literals") or [])
             if str(item).strip()
         ]
-        intent_summary = str(planner_result.get("intent_summary", "") or "").strip()
-        planner_constraints = [str(item) for item in (planner_result.get("constraints") or []) if item]
+        intent_summary = str(filtered_planner.get("intent_summary", "") or "").strip()
+        planner_constraints = [str(item) for item in (filtered_planner.get("constraints") or []) if item]
 
         if explicit_requirements:
             lines.append("Explicit user requirements from planner:")
@@ -204,6 +554,75 @@ def _compact_change_request_for_codegen(
             lines.extend(f"- {item}" for item in planner_constraints[:8])
 
     return "\n".join(lines).strip()
+
+
+def _existing_symbol_names_from_project_context(pc: dict[str, Any]) -> set[str]:
+    names: set[str] = set()
+    for item in pc.get("module_outline") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("qualname", "").rsplit(".", 1)[-1]).strip()
+        if name:
+            names.add(name)
+    for item in pc.get("class_members") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("qualname", "").rsplit(".", 1)[-1]).strip()
+        if name:
+            names.add(name)
+    target = pc.get("target_symbol") or {}
+    if isinstance(target, dict):
+        source = str(target.get("source") or "")
+        for match in re.finditer(r"^\s*(?:async\s+def|def|class)\s+([A-Za-z_]\w*)", source, flags=re.MULTILINE):
+            names.add(match.group(1))
+    return names
+
+
+def _mentions_any_symbol(text: str, names: set[str]) -> bool:
+    for name in names:
+        if name and re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", text):
+            return True
+    return False
+
+
+def _filter_planner_result_for_insert_after(
+    planner_result: dict[str, Any],
+    *,
+    user_text: str,
+    forbidden_existing_symbol_names: set[str],
+) -> dict[str, Any]:
+    if not forbidden_existing_symbol_names:
+        result = dict(planner_result)
+        result.pop("code", None)
+        return result
+
+    result = dict(planner_result)
+    result.pop("code", None)
+    user_text_lower = str(user_text or "").lower()
+
+    def is_forbidden_item(item: object) -> bool:
+        text = str(item or "").strip()
+        if not text:
+            return False
+        for name in forbidden_existing_symbol_names:
+            if not name:
+                continue
+            if not re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", text):
+                continue
+            if name.lower() not in user_text_lower:
+                return True
+        return False
+
+    for key in ("explicit_requirements", "preserve_literals"):
+        values = result.get(key) or []
+        if isinstance(values, str):
+            values = [values]
+        result[key] = [str(item).strip() for item in values if str(item).strip() and not is_forbidden_item(item)]
+
+    intent = str(result.get("intent_summary") or "").strip()
+    if intent and is_forbidden_item(intent):
+        result["intent_summary"] = "Создать новый symbol с уникальным именем по исходному запросу пользователя"
+    return result
 
 
 def build_test_planner_user_prompt(
@@ -275,6 +694,23 @@ def build_test_planner_user_prompt(
         request.reference_context or {},
         runtime_config=runtime_config,
     )
+    contract_context_text, contract_metrics = _render_contract_context(
+        pc,
+        max_items=runtime_config.test_prompt_contract_symbols if runtime_config else 3,
+        per_item_chars=runtime_config.test_prompt_contract_symbol_chars if runtime_config else 500,
+    )
+    contract_context_block = _render_optional_block(
+        "Связанные production-контракты",
+        _normalize_optional_value(contract_context_text),
+    )
+    contract_attribute_text, contract_attribute_metrics = _render_contract_attribute_requirements(
+        pc,
+        max_chars=_block_limit(runtime_config, "generate_block_chars", "contract_attribute_requirements", 1600),
+    )
+    contract_attribute_block = _render_optional_block(
+        "Contract attribute requirements for generated test data",
+        _normalize_optional_value(contract_attribute_text),
+    )
 
     import_context_text = _extract_import_context(full_file_source)
     inferred_symbols = _infer_project_symbols(target_source)
@@ -322,6 +758,8 @@ def build_test_planner_user_prompt(
         "inferred_symbols_block": _render_optional_block("Символы проекта из target-кода", inferred_symbols_text),
         "source_priority_block": "",
         "reference_context_block": reference_context_block,
+        "contract_context_block": contract_context_block,
+        "contract_attribute_requirements_block": contract_attribute_block,
         "anchor_symbol": anchor_symbol or "null",
     }
 
@@ -335,6 +773,9 @@ def build_test_planner_user_prompt(
         prompt += values["reference_context_block"]
     if isinstance(available_user_chars, int) and available_user_chars > 0 and len(prompt) > available_user_chars and values.get("reference_context_block"):
         values["reference_context_block"] = ""
+        prompt = template_text.format(**values)
+    if isinstance(available_user_chars, int) and available_user_chars > 0 and len(prompt) > available_user_chars and values.get("contract_context_block"):
+        values["contract_context_block"] = ""
         prompt = template_text.format(**values)
 
     metrics = {
@@ -352,7 +793,13 @@ def build_test_planner_user_prompt(
         "test_planner_default_constraints_count": len(default_constraints),
         "test_planner_reference_count": int(reference_metrics.get("reference_count", 0) or 0),
         "test_planner_reference_chars": int(reference_metrics.get("reference_chars", 0) or 0),
+        "test_planner_contract_symbols_count": int(contract_metrics.get("contract_symbols_count", 0) or 0),
+        "test_planner_contract_symbol_chars": int(contract_metrics.get("contract_symbol_chars", 0) or 0),
+        "test_planner_contract_attribute_requirements_count": int(contract_attribute_metrics.get("contract_attribute_requirements_count", 0) or 0),
+        "test_planner_contract_attribute_requirements_chars": int(contract_attribute_metrics.get("contract_attribute_requirements_chars", 0) or 0),
         "test_planner_has_reference_context": bool(values.get("reference_context_block")),
+        "test_planner_has_contract_context": bool(values.get("contract_context_block")),
+        "test_planner_has_contract_attribute_requirements": bool(values.get("contract_attribute_requirements_block")),
     }
     return prompt, metrics
 
@@ -362,10 +809,12 @@ def build_planner_user_prompt(
     *,
     available_user_chars: int | None = None,
     default_constraints: list[str] | None = None,
+    runtime_config: RuntimeConfig | None = None,
 ) -> tuple[str, dict[str, Any]]:
     pc = request.project_context or {}
     target_symbol = pc.get("target_symbol") or pc.get("target_function") or {}
     default_constraints = [str(item) for item in (default_constraints or []) if item]
+    generate_limits = "generate_block_chars"
 
     compact_request_text = _compact_change_request_for_codegen(
         request.change_request,
@@ -385,15 +834,39 @@ def build_planner_user_prompt(
     related_tests_text, related_test_metrics = _render_related_tests(
         pc,
         max_items=1,
-        per_item_chars=450,
+        per_item_chars=_block_limit(runtime_config, generate_limits, "related_tests", 700),
     )
     if related_tests_text == "none":
         related_tests_text = ""
 
+    contract_limit = _block_limit(runtime_config, generate_limits, "contract_context", 3200)
+    contract_items = max(1, int(getattr(runtime_config, "coder_max_contract_symbols", 4) if runtime_config else 4))
+    contract_context_text, contract_metrics = _render_contract_context(
+        pc,
+        max_items=contract_items,
+        per_item_chars=max(300, contract_limit // contract_items),
+    )
+    if contract_context_text == "none":
+        contract_context_text = ""
+
+    allowed_api_surface_text, allowed_surface_metrics = _render_allowed_api_surface(
+        pc,
+        max_chars=_block_limit(runtime_config, generate_limits, "allowed_api_surface", 2200),
+    )
+    if allowed_api_surface_text == "none":
+        allowed_api_surface_text = ""
+
+    visible_facts_text, visible_facts_metrics = _render_visible_implementation_facts(
+        pc,
+        max_chars=_block_limit(runtime_config, generate_limits, "allowed_api_surface", 2200),
+    )
+    if visible_facts_text == "none":
+        visible_facts_text = ""
+
     reference_text, reference_metrics = _render_reference_artifacts(
         request.reference_context or {},
         max_items=1,
-        per_item_chars=700,
+        per_item_chars=_block_limit(runtime_config, generate_limits, "reference", 700),
     )
     if reference_text == "none":
         reference_text = ""
@@ -405,16 +878,26 @@ def build_planner_user_prompt(
     )
 
     if isinstance(available_user_chars, int) and available_user_chars > 0:
-        if len(module_outline_text) > 700:
-            module_outline_text, _ = _truncate_text(module_outline_text, 700)
-        if len(target_source) > 1200:
-            target_source, _ = _truncate_text(target_source, 1200)
-        if len(full_file_source) > 1200:
-            full_file_source, _ = _truncate_text(full_file_source, 1200)
-        if len(related_tests_text) > 450:
-            related_tests_text, _ = _truncate_text(related_tests_text, 450)
-        if len(reference_text) > 700:
-            reference_text, _ = _truncate_text(reference_text, 700)
+        limits = {
+            "module_outline": _block_limit(runtime_config, generate_limits, "module_outline", 1000),
+            "target_source": _block_limit(runtime_config, generate_limits, "target_source", 1800),
+            "full_file": _block_limit(runtime_config, generate_limits, "full_file", 2600),
+            "related_tests": _block_limit(runtime_config, generate_limits, "related_tests", 700),
+            "contract_context": contract_limit,
+            "reference": _block_limit(runtime_config, generate_limits, "reference", 700),
+        }
+        if len(module_outline_text) > limits["module_outline"]:
+            module_outline_text, _ = _truncate_text(module_outline_text, limits["module_outline"])
+        if len(target_source) > limits["target_source"]:
+            target_source, _ = _truncate_text(target_source, limits["target_source"])
+        if len(full_file_source) > limits["full_file"]:
+            full_file_source, _ = _truncate_text(full_file_source, limits["full_file"])
+        if len(related_tests_text) > limits["related_tests"]:
+            related_tests_text, _ = _truncate_text(related_tests_text, limits["related_tests"])
+        if len(contract_context_text) > limits["contract_context"]:
+            contract_context_text, _ = _truncate_text(contract_context_text, limits["contract_context"])
+        if len(reference_text) > limits["reference"]:
+            reference_text, _ = _truncate_text(reference_text, limits["reference"])
 
     values = {
         "request": compact_request_text,
@@ -430,6 +913,9 @@ def build_planner_user_prompt(
         "target_function_block": _render_optional_block("Целевой symbol / anchor", target_source),
         "full_file_source_block": _render_optional_block("Полный исходный текст файла", full_file_source),
         "related_tests_block": _render_optional_block("Связанные тесты проекта", related_tests_text),
+        "allowed_api_surface_block": _render_optional_block("Allowed API Surface", allowed_api_surface_text),
+        "visible_implementation_facts_block": _render_optional_block("Visible implementation facts", visible_facts_text),
+        "contract_context_block": _render_optional_block("Связанные production-контракты", contract_context_text),
         "reference_function_block": _render_optional_block("Reference artifacts", reference_text),
     }
 
@@ -437,8 +923,6 @@ def build_planner_user_prompt(
         "build_planner_user_prompt template_vars=%s",
         sorted(values.keys()),
     )
-
-    prompt = template_text.format(**values)
 
     prompt = template_text.format(**values)
     metrics = {
@@ -449,11 +933,16 @@ def build_planner_user_prompt(
         "planner_full_file_chars": len(full_file_source),
         "planner_related_tests_count": int(related_test_metrics.get("related_tests_count", 0) or 0),
         "planner_related_test_chars": int(related_test_metrics.get("related_test_chars", 0) or 0),
+        "planner_contract_symbols_count": int(contract_metrics.get("contract_symbols_count", 0) or 0),
+        "planner_contract_symbol_chars": int(contract_metrics.get("contract_symbol_chars", 0) or 0),
+        "planner_allowed_api_surface_chars": int(allowed_surface_metrics.get("allowed_api_surface_chars", 0) or 0),
+        "planner_visible_implementation_facts_chars": int(visible_facts_metrics.get("visible_implementation_facts_chars", 0) or 0),
         "planner_reference_count": int(reference_metrics.get("reference_count", 0) or 0),
         "planner_reference_chars": int(reference_metrics.get("reference_chars", 0) or 0),
         "planner_default_constraints_count": len(default_constraints),
     }
     return prompt, metrics
+
 
 def build_coder_user_prompt(
     template_text: str,
@@ -498,9 +987,39 @@ def build_coder_user_prompt(
     )
     related_tests_text = _normalize_optional_value(related_tests_text)
 
+    contract_context_text, contract_metrics = _render_contract_context(
+        pc,
+        max_items=runtime_config.coder_max_contract_symbols,
+        per_item_chars=runtime_config.coder_max_contract_symbol_chars,
+    )
+    contract_context_text = _normalize_optional_value(contract_context_text)
+
+    coder_visible_facts_text, coder_visible_facts_metrics = _render_visible_implementation_facts(
+        pc,
+        max_chars=getattr(runtime_config.prompt_assembly, "allowed_api_surface_chars", 1600),
+    )
+    coder_visible_facts_text = _normalize_optional_value(coder_visible_facts_text)
+    protected_contract_context = _render_optional_block(
+        "Allowed API Surface and visible implementation facts (authoritative)",
+        coder_visible_facts_text,
+    )
+    if protected_contract_context and contract_context_text:
+        contract_context_text = f"{protected_contract_context}\n\n---\n\n{contract_context_text}"
+    elif protected_contract_context:
+        contract_context_text = protected_contract_context
+
+    forbidden_existing_symbol_names = set()
+    if requested_operation == "insert_after_symbol":
+        forbidden_existing_symbol_names = _existing_symbol_names_from_project_context(pc)
+    effective_planner_result = _filter_planner_result_for_insert_after(
+        planner_result,
+        user_text=_compact_change_request_for_codegen(request.change_request, None),
+        forbidden_existing_symbol_names=forbidden_existing_symbol_names,
+    )
     compact_request_text = _compact_change_request_for_codegen(
         request.change_request,
-        planner_result,
+        effective_planner_result,
+        forbidden_existing_symbol_names=forbidden_existing_symbol_names,
     )
 
     target_limit = int(runtime_config.coder_prompt_target_chars or 0)
@@ -525,6 +1044,7 @@ def build_coder_user_prompt(
         full_file_value: str,
         reference_value: str,
         related_tests_value: str,
+        contract_context_value: str,
         request_value: str,
     ) -> str:
         return template_text.format(
@@ -538,7 +1058,7 @@ def build_coder_user_prompt(
             or request.target.get("qualname", "")
             or "null",
             reference_symbol="null",
-            planner_json=_pretty(planner_result),
+            planner_json=_pretty(effective_planner_result),
             request=request_value,
             module_outline_block=_render_optional_block(
                 "Структура модуля",
@@ -560,6 +1080,10 @@ def build_coder_user_prompt(
                 "Related tests",
                 _normalize_optional_value(related_tests_value),
             ),
+            contract_context_block=_render_optional_block(
+                "Связанные production-контракты",
+                _normalize_optional_value(contract_context_value),
+            ),
         )
 
     # Обязательные части
@@ -570,6 +1094,9 @@ def build_coder_user_prompt(
     # Опциональные части будем подключать по приоритету
     current_full_file = ""
     current_related_tests = ""
+    # Keep Allowed API Surface / visible facts in the base prompt.
+    # This context is authoritative and must not be skipped before full_file/reference.
+    current_contract_context = contract_context_text
     current_reference = ""
 
     # Для insert_after_symbol reference обычно наименее надежен,
@@ -597,6 +1124,7 @@ def build_coder_user_prompt(
         current_full_file,
         current_reference,
         current_related_tests,
+        current_contract_context,
         current_request,
     )
     before_trim = len(prompt)
@@ -611,6 +1139,7 @@ def build_coder_user_prompt(
             current_full_file,
             current_reference,
             current_related_tests,
+            current_contract_context,
             current_request,
         )
 
@@ -623,6 +1152,7 @@ def build_coder_user_prompt(
             current_full_file,
             current_reference,
             current_related_tests,
+            current_contract_context,
             current_request,
         )
 
@@ -635,6 +1165,7 @@ def build_coder_user_prompt(
             current_full_file,
             current_reference,
             current_related_tests,
+            current_contract_context,
             current_request,
         )
 
@@ -646,6 +1177,7 @@ def build_coder_user_prompt(
 
         prev_full_file = current_full_file
         prev_related_tests = current_related_tests
+        prev_contract_context = current_contract_context
         prev_reference = current_reference
         prev_module_outline = current_module_outline
 
@@ -653,6 +1185,8 @@ def build_coder_user_prompt(
             current_full_file = block_text
         elif block_name == "related_tests":
             current_related_tests = block_text
+        elif block_name == "contract_context":
+            current_contract_context = block_text
         elif block_name == "reference":
             current_reference = block_text
         elif block_name == "module_outline":
@@ -664,6 +1198,7 @@ def build_coder_user_prompt(
             current_full_file,
             current_reference,
             current_related_tests,
+            current_contract_context,
             current_request,
         )
 
@@ -671,6 +1206,7 @@ def build_coder_user_prompt(
         if soft_limit and len(candidate_prompt) > soft_limit:
             current_full_file = prev_full_file
             current_related_tests = prev_related_tests
+            current_contract_context = prev_contract_context
             current_reference = prev_reference
             current_module_outline = prev_module_outline
             _record(f"skipped {block_name} due to soft size target")
@@ -690,6 +1226,7 @@ def build_coder_user_prompt(
             current_full_file,
             current_reference,
             current_related_tests,
+            current_contract_context,
             current_request,
         )
 
@@ -702,6 +1239,7 @@ def build_coder_user_prompt(
             current_full_file,
             current_reference,
             current_related_tests,
+            current_contract_context,
             current_request,
         )
 
@@ -714,6 +1252,7 @@ def build_coder_user_prompt(
             current_full_file,
             current_reference,
             current_related_tests,
+            current_contract_context,
             current_request,
         )
 
@@ -726,6 +1265,7 @@ def build_coder_user_prompt(
             current_full_file,
             current_reference,
             current_related_tests,
+            current_contract_context,
             current_request,
         )
 
@@ -738,6 +1278,20 @@ def build_coder_user_prompt(
             current_full_file,
             current_reference,
             current_related_tests,
+            current_contract_context,
+            current_request,
+        )
+
+    if effective_limit and len(prompt) > effective_limit and current_contract_context:
+        current_contract_context, _ = _truncate_text(current_contract_context, 900)
+        _record("truncated protected contract_context to 900 on hard overflow")
+        prompt = _render(
+            current_module_outline,
+            current_target,
+            current_full_file,
+            current_reference,
+            current_related_tests,
+            current_contract_context,
             current_request,
         )
 
@@ -750,6 +1304,7 @@ def build_coder_user_prompt(
             current_full_file,
             current_reference,
             current_related_tests,
+            current_contract_context,
             current_request,
         )
 
@@ -762,6 +1317,7 @@ def build_coder_user_prompt(
             current_full_file,
             current_reference,
             current_related_tests,
+            current_contract_context,
             current_request,
         )
 
@@ -774,6 +1330,7 @@ def build_coder_user_prompt(
             current_full_file,
             current_reference,
             current_related_tests,
+            current_contract_context,
             current_request,
         )
 
@@ -784,12 +1341,17 @@ def build_coder_user_prompt(
         current_full_file,
         current_reference,
         current_related_tests,
+        current_contract_context,
         before_trim,
         len(prompt),
         trim_steps,
     )
     metrics.update(ref_metrics)
     metrics.update(related_test_metrics)
+    metrics.update(contract_metrics)
+    metrics["coder_visible_implementation_facts_chars"] = int(
+        coder_visible_facts_metrics.get("visible_implementation_facts_chars", 0) or 0
+    )
 
     logger.info(
         "coder prompt priority assembly request_id=%s operation=%s soft_limit=%s effective_limit=%s final_chars=%s trim_steps=%s",
@@ -880,6 +1442,50 @@ def _build_repair_syntax_error_block(
 
     return ""
 
+
+def _build_repair_problem_block(
+    error_context: dict[str, Any],
+) -> str:
+    verification_summary = (error_context or {}).get("verification_summary") or {}
+    failed_blocks = verification_summary.get("failed_blocks") or []
+    problems: list[dict[str, Any]] = []
+
+    for block in failed_blocks:
+        block_name = str(block.get("name") or "")
+        for issue in block.get("issues") or []:
+            code = str(issue.get("code") or "")
+            message = str(issue.get("message") or "")
+            symbol = str(issue.get("symbol") or "")
+            item: dict[str, Any] = {
+                "block": block_name,
+                "code": code,
+                "message": message,
+            }
+            if symbol:
+                item["symbol"] = symbol
+            if code == "contract_call_uses_unrequested_literal_arg":
+                item["repair_objective"] = (
+                    "Do not keep or replace the failing argument with another placeholder literal. "
+                    "Make the new symbol accept the required value as a parameter, reuse a local variable "
+                    "from visible context, or choose another visible contract."
+                )
+            elif code == "unknown_injected_dependency_method":
+                item["repair_objective"] = (
+                    "Do not keep or rename the invented dependency method. Use only methods of injected "
+                    "dependencies that are explicitly visible in target source, module/full file context, "
+                    "related symbols, or contract context. If no such method exists, choose a visible contract "
+                    "or make the required value an explicit parameter of the new symbol."
+                )
+            problems.append(item)
+
+    if not problems:
+        return ""
+
+    return _render_optional_block(
+        "Критическая ошибка для repair",
+        _pretty({"issues": problems[:3]}),
+    )
+
 def _render_optional_block(title: str, value: str) -> str:
     text = str(value or "").strip()
     if not text or text in {"none", "[]", "null"}:
@@ -934,7 +1540,35 @@ def build_repair_user_prompt(
         request.reference_context or {},
         runtime_config,
     )
+    contract_context_text, contract_metrics = _render_contract_context(
+        project_context,
+        max_items=runtime_config.repair_max_contract_symbols if runtime_config else 2,
+        per_item_chars=runtime_config.repair_max_contract_symbol_chars if runtime_config else 500,
+    )
+    contract_context_block = _render_optional_block(
+        "Связанные production-контракты",
+        _normalize_optional_value(contract_context_text),
+    )
+    contract_attribute_text, contract_attribute_metrics = _render_contract_attribute_requirements(
+        project_context,
+        max_chars=_block_limit(runtime_config, "generate_block_chars", "contract_attribute_requirements", 1600),
+    )
+    contract_attribute_requirements_block = _render_optional_block(
+        "Contract attribute requirements",
+        _normalize_optional_value(contract_attribute_text),
+    )
+    required_contracts_text, _required_contracts_metrics = _render_required_contracts(
+        project_context,
+        max_chars=_block_limit(runtime_config, "generate_block_chars", "required_contracts", 1000),
+    )
+    required_contracts_block = _render_optional_block(
+        "Required production contract calls",
+        _normalize_optional_value(required_contracts_text),
+    )
     syntax_error_block = _build_repair_syntax_error_block(
+        request.error_context or {},
+    )
+    repair_problem_block = _build_repair_problem_block(
         request.error_context or {},
     )
 # ***********************
@@ -953,6 +1587,7 @@ def build_repair_user_prompt(
         ),
         "insert_after": previous_artifact.get("insert_after") or "null",
         "request": _compact_change_request_for_codegen(change_request, None) or "repair request",
+        "repair_problem_block": repair_problem_block,
         "syntax_error_block": syntax_error_block,
         "previous_code_block": _render_optional_block(
             "Код, который нужно исправить",
@@ -971,6 +1606,9 @@ def build_repair_user_prompt(
             full_file_source,
         ),
         "reference_context_block": reference_context_block,
+        "contract_context_block": contract_context_block,
+        "contract_attribute_requirements_block": contract_attribute_requirements_block,
+        "required_contracts_block": required_contracts_block,
     }
 
     prompt = template_text.format(**values)
@@ -982,6 +1620,16 @@ def build_repair_user_prompt(
     if hard_limit and len(prompt) > hard_limit and values["reference_context_block"]:
         values["reference_context_block"] = ""
         trim_steps.append("removed reference_context_block")
+        prompt = _rerender()
+
+    if hard_limit and len(prompt) > hard_limit and values["contract_context_block"]:
+        values["contract_context_block"] = ""
+        trim_steps.append("removed contract_context_block")
+        prompt = _rerender()
+
+    if hard_limit and len(prompt) > hard_limit and values.get("required_contracts_block"):
+        values["required_contracts_block"] = ""
+        trim_steps.append("removed required_contracts_block")
         prompt = _rerender()
 
     if hard_limit and len(prompt) > hard_limit and values["module_outline_block"]:
@@ -1005,7 +1653,7 @@ def build_repair_user_prompt(
 
     logger.info(
         "repair prompt assembly request_id=%s hard_limit=%s final_chars=%s trim_steps=%s "
-        "has_previous_code=%s has_target=%s has_module_outline=%s has_full_file=%s has_reference=%s",
+        "has_previous_code=%s has_target=%s has_module_outline=%s has_full_file=%s has_contract_context=%s has_reference=%s",
         request.request_id,
         hard_limit,
         len(prompt),
@@ -1014,6 +1662,7 @@ def build_repair_user_prompt(
         bool(values["target_function_block"]),
         bool(values["module_outline_block"]),
         bool(values["full_file_source_block"]),
+        bool(values["contract_context_block"]),
         bool(values["reference_context_block"]),
     )
 
@@ -1139,6 +1788,19 @@ def _build_test_reference_context_block(
     return _render_optional_block("Справочные примеры для теста", reference_text), metrics
 
 
+
+
+def _select_test_plan_fields_for_prompt(test_plan: dict[str, Any], fields: list[str]) -> dict[str, Any]:
+    if not isinstance(test_plan, dict) or not test_plan:
+        return {}
+    if not fields:
+        return dict(test_plan)
+    selected: dict[str, Any] = {}
+    for field in fields:
+        if field in test_plan:
+            selected[field] = test_plan[field]
+    return selected
+
 def _build_test_prompt_values(
     *,
     request: GenerationRequest,
@@ -1156,6 +1818,9 @@ def _build_test_prompt_values(
     anchor_symbol: str | None,
     test_plan_text: str,
     reference_context_block: str = "",
+    contract_context_block: str = "",
+    contract_attribute_requirements_block: str = "",
+    required_imports_text: str = "",
 ) -> dict[str, str]:
     target_block = _render_optional_block("Сгенерированный target-код", target_source)
     example_block = _render_optional_block("Пример теста", example_text)
@@ -1172,6 +1837,10 @@ def _build_test_prompt_values(
     test_plan_block = _render_optional_block(
         "План теста",
         test_plan_text,
+    )
+    required_imports_block = _render_optional_block(
+        "Required project imports",
+        required_imports_text,
     )
     return {
         "operation": request.target.get("operation", "replace_symbol"),
@@ -1199,7 +1868,10 @@ def _build_test_prompt_values(
         "import_context_block": import_context_block,
         "inferred_symbols_block": inferred_symbols_block,
         "test_plan_block": test_plan_block,
+        "required_imports_block": required_imports_block,
         "reference_context_block": reference_context_block,
+        "contract_context_block": contract_context_block,
+        "contract_attribute_requirements_block": contract_attribute_requirements_block,
     }
 
 def _log_test_prompt_state(
@@ -1217,12 +1889,14 @@ def _log_test_prompt_state(
     effective_target_symbol: str,
     anchor_symbol: str | None,
     reference_context_block: str = "",
+    contract_context_block: str = "",
+    contract_attribute_requirements_block: str = "",
 ) -> None:
     logger.info(
         "Test prompt state stage=%s operation=%s prompt_chars=%s available_user_chars=%s "
         "target_chars=%s request_chars=%s example_chars=%s related_tests_chars=%s "
         "has_related_tests=%s import_context_chars=%s inferred_symbols_chars=%s "
-        "reference_chars=%s has_reference=%s effective_target_symbol=%s anchor_symbol=%s",
+        "reference_chars=%s has_reference=%s contract_context_chars=%s has_contract_context=%s contract_attribute_requirements_chars=%s has_contract_attribute_requirements=%s effective_target_symbol=%s anchor_symbol=%s",
         stage,
         requested_operation,
         prompt_len,
@@ -1236,6 +1910,10 @@ def _log_test_prompt_state(
         len(inferred_symbols_text or ""),
         len(reference_context_block or ""),
         bool(str(reference_context_block or "").strip()),
+        len(contract_context_block or ""),
+        bool(str(contract_context_block or "").strip()),
+        len(contract_attribute_requirements_block or ""),
+        bool(str(contract_attribute_requirements_block or "").strip()),
         effective_target_symbol,
         anchor_symbol,
     )
@@ -1253,7 +1931,16 @@ def build_test_generator_user_prompt(
 ) -> tuple[str, dict[str, Any]]:
     pc = request.project_context or {}
     effective_test_plan = test_plan or request.test_plan or {}
-    test_plan_text = _pretty(effective_test_plan) if effective_test_plan else ""    
+    prompt_test_plan = _select_test_plan_fields_for_prompt(
+        effective_test_plan,
+        list(runtime_config.prompt_assembly.test_generator_plan_fields or []),
+    )
+    test_plan_text = _pretty(prompt_test_plan) if prompt_test_plan else ""    
+    required_imports = _required_project_imports_from_symbols(
+        request.project_context or {},
+        list((effective_test_plan or {}).get("must_use_symbols") or []),
+    )
+    required_imports_text = "\n".join(required_imports)
     target_symbol = pc.get("target_symbol") or {}
     compact_request_text = _compact_change_request_for_codegen(
         request.change_request,
@@ -1311,6 +1998,23 @@ def build_test_generator_user_prompt(
     reference_context_block, reference_metrics = _build_test_reference_context_block(
         request.reference_context or {},
         runtime_config,
+    )
+    contract_context_text, contract_metrics = _render_contract_context(
+        pc,
+        max_items=runtime_config.test_prompt_contract_symbols,
+        per_item_chars=runtime_config.test_prompt_contract_symbol_chars,
+    )
+    contract_context_block = _render_optional_block(
+        "Связанные production-контракты",
+        _normalize_optional_value(contract_context_text),
+    )
+    contract_attribute_text, contract_attribute_metrics = _render_contract_attribute_requirements(
+        pc,
+        max_chars=_block_limit(runtime_config, "generate_block_chars", "contract_attribute_requirements", 1600),
+    )
+    contract_attribute_requirements_block = _render_optional_block(
+        "Contract attribute requirements for generated test data",
+        _normalize_optional_value(contract_attribute_text),
     )
 
     import_context_text = _extract_import_context(full_file_source_text)
@@ -1402,10 +2106,15 @@ def build_test_generator_user_prompt(
             anchor_symbol=anchor_symbol,
             test_plan_text=test_plan_text,
             reference_context_block=reference_context_block,
+            contract_context_block=contract_context_block,
+            contract_attribute_requirements_block=contract_attribute_requirements_block,
+            required_imports_text=required_imports_text,
         )
         prompt_value = template_text.format(**values)
         if "{reference_context_block}" not in template_text and values.get("reference_context_block"):
             prompt_value += values["reference_context_block"]
+        if "{contract_context_block}" not in template_text and values.get("contract_context_block"):
+            prompt_value += values["contract_context_block"]
         return prompt_value
 
     def _log(stage: str, prompt_value: str) -> None:
@@ -1423,6 +2132,8 @@ def build_test_generator_user_prompt(
             effective_target_symbol=effective_target_symbol,
             anchor_symbol=anchor_symbol,
             reference_context_block=reference_context_block,
+            contract_context_block=contract_context_block,
+            contract_attribute_requirements_block=contract_attribute_requirements_block,
         )
 
     def _fits_with_soft_overflow(prompt_value: str) -> bool:
@@ -1459,6 +2170,14 @@ def build_test_generator_user_prompt(
         _record("removed reference_context_block on size limit")
         prompt = _render_prompt()
         _log("after_remove_reference_context", prompt)
+
+    # Contract attribute requirements are more important than generic contract source,
+    # because they directly constrain generated test data/fakes.
+    if len(prompt) > available_user_chars and contract_context_block:
+        contract_context_block = ""
+        _record("removed contract_context_block on size limit")
+        prompt = _render_prompt()
+        _log("after_remove_contract_context", prompt)
 
     # Одна простая попытка ужать related tests, не вводя многоступенчатую схему.
     if len(prompt) > available_user_chars and related_tests_text:
@@ -1506,6 +2225,18 @@ def build_test_generator_user_prompt(
         prompt = _render_prompt()
         _log("after_remove_reference_context_hard", prompt)
 
+    if not _fits_with_soft_overflow(prompt) and contract_context_block:
+        contract_context_block = ""
+        _record("removed contract_context_block on hard size overflow")
+        prompt = _render_prompt()
+        _log("after_remove_contract_context_hard", prompt)
+
+    if not _fits_with_soft_overflow(prompt) and contract_attribute_requirements_block:
+        contract_attribute_requirements_block = ""
+        _record("removed contract_attribute_requirements_block on hard size overflow")
+        prompt = _render_prompt()
+        _log("after_remove_contract_attribute_requirements_hard", prompt)
+
     if not _fits_with_soft_overflow(prompt) and full_file_source_text:
         full_file_source_text = ""
         _record("removed full_file_source context on hard size overflow")
@@ -1534,7 +2265,7 @@ def build_test_generator_user_prompt(
         "test prompt final blocks operation=%s prompt_chars=%s available_user_chars=%s "
         "soft_overflow_chars=%s has_request=%s has_full_file=%s has_example=%s "
         "has_related_tests=%s target_chars=%s request_chars=%s full_file_chars=%s "
-        "example_chars=%s related_tests_chars=%s reference_chars=%s has_reference=%s",
+        "example_chars=%s related_tests_chars=%s reference_chars=%s has_reference=%s contract_context_chars=%s has_contract_context=%s contract_attribute_requirements_chars=%s has_contract_attribute_requirements=%s",
         requested_operation,
         len(prompt),
         available_user_chars,
@@ -1550,6 +2281,10 @@ def build_test_generator_user_prompt(
         len(related_tests_text or ""),
         len(reference_context_block or ""),
         bool(str(reference_context_block or "").strip()),
+        len(contract_context_block or ""),
+        bool(str(contract_context_block or "").strip()),
+        len(contract_attribute_requirements_block or ""),
+        bool(str(contract_attribute_requirements_block or "").strip()),
     )
 
     _log("final", prompt)
@@ -1573,11 +2308,116 @@ def build_test_generator_user_prompt(
         "test_trim_steps": trim_steps,
         "test_reference_count": int(reference_metrics.get("reference_count", 0) or 0),
         "test_reference_chars": int(reference_metrics.get("reference_chars", 0) or 0),
+        "test_contract_symbols_count": int(contract_metrics.get("contract_symbols_count", 0) or 0),
+        "test_contract_symbol_chars": int(contract_metrics.get("contract_symbol_chars", 0) or 0),
+        "test_contract_attribute_requirements_count": int(contract_attribute_metrics.get("contract_attribute_requirements_count", 0) or 0),
+        "test_contract_attribute_requirements_chars": int(contract_attribute_metrics.get("contract_attribute_requirements_chars", 0) or 0),
         "test_has_example_block": bool(example_text),
         "test_has_related_tests_block": bool(str(related_tests_text or "").strip()),
         "test_has_import_context_block": bool(import_context_text),
         "test_has_inferred_symbols_block": bool(inferred_symbols_text),
         "test_has_full_file_context": bool(full_file_source_text),
         "test_has_reference_context": bool(reference_context_block),
+        "test_has_contract_context": bool(contract_context_block),
+        "test_has_contract_attribute_requirements": bool(contract_attribute_requirements_block),
     }
     return prompt, metrics
+
+
+def build_repair_planner_user_prompt(
+    template_text: str,
+    request: RepairRequest,
+    runtime_config: RuntimeConfig | None = None,
+) -> str:
+    """Build prompt for the dedicated repair planner."""
+    project_context = request.project_context or {}
+    target_symbol = project_context.get("target_symbol") or {}
+    previous_artifact = request.previous_artifact or {}
+    change_request = request.change_request or {}
+
+    requested_operation = previous_artifact.get("operation") or request.target.get("operation") or "replace_symbol"
+
+    module_outline_text = _normalize_optional_value(
+        _render_module_outline(project_context.get("module_outline", []))
+    )
+    if module_outline_text:
+        module_outline_text, _ = _truncate_text(
+            module_outline_text,
+            _block_limit(runtime_config, "repair_block_chars", "module_outline", 600),
+        )
+
+    target_rendered = _render_target_symbol(target_symbol)
+    if target_rendered:
+        target_rendered, _ = _truncate_text(
+            target_rendered,
+            _block_limit(runtime_config, "repair_block_chars", "target_source", 900),
+        )
+    target_rendered = _normalize_optional_value(target_rendered)
+
+    previous_code = str(previous_artifact.get("code", "") or "")
+    if previous_code:
+        previous_code, _ = _truncate_text(
+            previous_code,
+            _block_limit(runtime_config, "repair_block_chars", "previous_code", 1200),
+        )
+    previous_code = _normalize_optional_value(previous_code)
+
+    contract_context_text, _ = _render_contract_context(
+        project_context,
+        max_items=runtime_config.repair_max_contract_symbols if runtime_config else 4,
+        per_item_chars=runtime_config.repair_max_contract_symbol_chars if runtime_config else 700,
+    )
+    contract_context_text = _normalize_optional_value(contract_context_text)
+
+    allowed_api_surface_text = ""
+    if "_render_allowed_api_surface" in globals():
+        try:
+            allowed_api_surface_text, _ = _render_allowed_api_surface(
+                project_context,
+                max_chars=_block_limit(runtime_config, "repair_block_chars", "allowed_api_surface", 1600),
+            )
+            allowed_api_surface_text = _normalize_optional_value(allowed_api_surface_text)
+        except Exception:
+            allowed_api_surface_text = ""
+
+    if allowed_api_surface_text and contract_context_text:
+        contract_context_text = (
+            "Allowed API Surface (authoritative; do not invent dependency calls outside this list):\n"
+            f"{allowed_api_surface_text}\n\n---\n\nRelated production contracts:\n{contract_context_text}"
+        )
+    elif allowed_api_surface_text:
+        contract_context_text = (
+            "Allowed API Surface (authoritative; do not invent dependency calls outside this list):\n"
+            f"{allowed_api_surface_text}"
+        )
+
+    repair_problem_block = _build_repair_problem_block(request.error_context or {})
+    previous_code_block = _render_optional_block("Код, который нужно исправить", previous_code)
+    target_function_block = _render_optional_block("Исходный target symbol", target_rendered)
+    contract_context_block = _render_optional_block(
+        "Связанные production-контракты и Allowed API Surface",
+        contract_context_text,
+    )
+    module_outline_block = _render_optional_block("Структура модуля", module_outline_text)
+    compact_request = _compact_change_request_for_codegen(change_request)
+
+    values = {
+        "requested_operation": str(requested_operation or ""),
+        "target_file": str(request.target.get("file_path") or previous_artifact.get("target_file") or ""),
+        "target_symbol": str(
+            request.target.get("qualname")
+            or previous_artifact.get("target_qualname")
+            or previous_artifact.get("target_symbol")
+            or ""
+        ),
+        "insert_after": str(previous_artifact.get("insert_after") or previous_artifact.get("target_qualname") or ""),
+        "request": compact_request,
+        "repair_problem_block": repair_problem_block,
+        "previous_code_block": previous_code_block,
+        "target_function_block": target_function_block,
+        "contract_context_block": contract_context_block,
+        "module_outline_block": module_outline_block,
+    }
+
+    return template_text.format(**values)
+

@@ -13,7 +13,7 @@ from codegenerator.generation.planner import (
     parse_planner_response,
     parse_test_planner_response,
 )
-from codegenerator.generation.repair import parse_repair_response
+from codegenerator.generation.repair import parse_repair_response, parse_repair_plan_response
 from codegenerator.generation.test_generator import (
     build_generated_test_filename,
     parse_test_response,
@@ -27,6 +27,7 @@ from codegenerator.prompts.prompt_builder import (
     build_coder_user_prompt,
     build_planner_user_prompt,
     build_repair_user_prompt,
+    build_repair_planner_user_prompt,
     build_test_generator_user_prompt,
     build_test_planner_user_prompt,
 )
@@ -198,6 +199,8 @@ def _call_llm_with_trace(
     extra_payload: dict[str, Any] | None = None,
 ):
     payload_extra = extra_payload or {}
+    raw = None
+    meta = None
     try:
         raw, meta = call_model(
             client=client,
@@ -208,9 +211,26 @@ def _call_llm_with_trace(
             config=config,
             step=step_name_for_gateway,
         )
-        parsed = parser(raw.content)
         llm_usage = _extract_llm_usage(raw)
         trace['llm_usage'] = _merge_llm_usage(trace.get('llm_usage'), llm_usage)
+        try:
+            parsed = parser(raw.content)
+        except Exception as parse_exc:
+            _add_step(
+                trace,
+                error_step,
+                {
+                    "meta": _serialize_meta(meta),
+                    "prompt": user_prompt,
+                    "raw": raw.raw,
+                    "content": raw.content,
+                    "llm_usage": llm_usage,
+                    "error": str(parse_exc),
+                    "error_stage": "parse",
+                    **payload_extra,
+                },
+            )
+            raise
         _add_step(
             trace,
             trace_step,
@@ -226,15 +246,21 @@ def _call_llm_with_trace(
         )
         return parsed, raw, meta
     except Exception as exc:
-        _add_step(
-            trace,
-            error_step,
-            {
+        # Parser failures are already recorded above with raw model output.
+        if not trace.get("steps") or trace["steps"][-1].get("step") != error_step:
+            payload = {
                 "prompt": user_prompt,
                 "error": str(exc),
                 **payload_extra,
-            },
-        )
+            }
+            if raw is not None:
+                payload.update({
+                    "meta": _serialize_meta(meta),
+                    "raw": raw.raw,
+                    "content": raw.content,
+                    "llm_usage": _extract_llm_usage(raw),
+                })
+            _add_step(trace, error_step, payload)
         raise
 
 
@@ -340,6 +366,7 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
             request,
             available_user_chars=available_user_chars,
             default_constraints=config.defaults_constraints,
+            runtime_config=config,
         )
         logger.info(
             "planner prompt metrics request_id=%s prompt_chars=%s request_chars=%s module_outline_chars=%s target_chars=%s full_file_chars=%s related_tests_count=%s related_test_chars=%s reference_count=%s reference_chars=%s default_constraints_count=%s",
@@ -397,6 +424,30 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
             step_name_for_gateway="planner",
             parser=parse_planner_response,
         )
+
+        planner_status = str(planner_result.get("status") or "ok").strip().lower()
+        if planner_status in {"needs_planning", "not_enough_context"}:
+            reason = str(
+                planner_result.get("reason")
+                or planner_result.get("message")
+                or planner_status
+            )
+            suggested_next_step = str(planner_result.get("suggested_next_step") or "")
+            message = reason
+            if suggested_next_step:
+                message = f"{reason} Suggested next step: {suggested_next_step}"
+            result = GenerationResult(
+                request_id=request.request_id,
+                status="blocked_by_planner",
+                planner_result=planner_result,
+                trace_path=str(trace_path),
+                llm_usage=trace.get("llm_usage"),
+                error_type=planner_status,
+                message=message,
+            )
+            trace["result"] = result.to_dict()
+            save_trace(trace_path, trace)
+            return result
 
         coder_prompt, coder_context_metrics = build_coder_user_prompt(
             prompts["coder_user_template"],
@@ -913,6 +964,60 @@ def repair(request: RepairRequest, config_path: str) -> GenerationResult:
             request.previous_artifact.get("operation")
             or "replace_symbol"
         )
+
+        repair_planner_prompt = build_repair_planner_user_prompt(
+            prompts["repair_planner_user_template"],
+            request,
+            config,
+        )
+        _log_prompt_size(
+            request_id=request.request_id,
+            step="repair_planner",
+            user_prompt=repair_planner_prompt,
+            system_prompt=prompts["system_rules"],
+            total_prompt_limit=config.prompt_budget.repair_chars_limit,
+        )
+        _enforce_prompt_limit(
+            "repair_planner",
+            repair_planner_prompt,
+            prompts["system_rules"],
+            config.prompt_budget.repair_chars_limit,
+        )
+        logger.info(
+            "repair planner request_id=%s model=%s",
+            request.request_id,
+            config.models.planner_model,
+        )
+        repair_plan, _, _ = _call_llm_with_trace(
+            trace=trace,
+            trace_step="repair_planner",
+            error_step="repair_planner_error",
+            request_id=request.request_id,
+            client=client,
+            model=config.models.planner_model,
+            system_prompt=prompts["system_rules"],
+            user_prompt=repair_planner_prompt,
+            think=config.ollama.think,
+            config=config,
+            step_name_for_gateway="repair_planner",
+            parser=parse_repair_plan_response,
+        )
+        if str(repair_plan.get("status") or "repairable").strip().lower() == "not_repairable":
+            result = GenerationResult(
+                request_id=request.request_id,
+                status="error",
+                planner_result=repair_plan,
+                trace_path=str(trace_path),
+                llm_usage=trace.get("llm_usage"),
+                error_type="not_repairable",
+                message=str(repair_plan.get("reason") or repair_plan.get("message") or "not_repairable"),
+            )
+            trace["result"] = result.to_dict()
+            save_trace(trace_path, trace)
+            return result
+
+        request.error_context = dict(request.error_context or {})
+        request.error_context["repair_plan"] = repair_plan
 
         repair_prompt = build_repair_user_prompt(
             prompts["repair_user_template"],

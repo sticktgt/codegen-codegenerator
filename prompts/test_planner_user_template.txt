@@ -8,12 +8,20 @@
 - must_use_symbols
 - avoid
 
-Не придумывай отсутствующие import path, поля, методы, аргументы конструктора и атрибуты.
-Опирайся только на явно видимый контекст.
-Сохраняй явно указанные пользователем имена методов, функций, классов, параметров и форматы ожидаемого результата; не заменяй их именами из сгенерированного кода, если они противоречат запросу.
-План должен быть коротким и полезным именно для генерации одного тестового файла.
-Если operation=insert_after_symbol, target_symbol уже указывает на новый symbol для тестирования, а не на anchor-symbol.
-Если insert_scope=class_body, target_symbol указывает на новый метод; тест должен использовать parent class и вызывать метод через экземпляр.
+Правила:
+- Планируй тест только по видимому проектному контексту: target source, full file source, related tests, contract context, import context.
+- Не придумывай import path, поля, методы, аргументы конструктора и атрибуты.
+- must_use_symbols должен включать тестируемый symbol и только те project symbols, которые реально нужны для теста.
+- Планируй test-функции без fixture-параметров, если fixture-параметры явно не показаны в связанных тестах проекта.
+- Не планируй optional pytest plugin fixtures и plugin-specific patch/mock.
+- Если нужен контроль зависимости или результата, предпочитай локальные fake/stub классы.
+- Если patch действительно необходим, планируй только стандартную библиотеку Python.
+- Если operation=insert_after_symbol, target_symbol уже указывает на новый symbol для тестирования, а не на anchor-symbol.
+- Если insert_scope=class_body, target_symbol указывает на новый метод: тест должен использовать parent class и вызывать метод через экземпляр.
+- Для dict результата ожидаемые значения должны следовать из target source и явно видимых defaults/полей моделей; не придумывай expected values.
+- Если expected value зависит от default field values модели, вычисляй его из этих defaults и данных теста.
+- Если передан блок Contract attribute requirements, test data/fake/stub обязаны реализовать перечисленные required_fields; для реальных project models используй только constructor_fields, а не похожие alias-поля.
+- Все текстовые значения JSON пиши на русском языке.
 
 Change request and explicit requirements:
 {request}
@@ -33,11 +41,11 @@ Full file source:
 
 {related_tests_block}
 
+{contract_context_block}
+{contract_attribute_requirements_block}
+
 {reference_context_block}
 
 {import_context_block}
 
 {inferred_symbols_block}
-
-Приоритет контекста:
-Сначала опирайся на связанные тесты, полный исходник файла, справочные примеры и явные сигнатуры/импорты. Не придумывай отсутствующие import path, поля, методы и аргументы конструктора.
