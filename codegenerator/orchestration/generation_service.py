@@ -23,6 +23,8 @@ from codegenerator.logger import get_logger
 from codegenerator.models.artifacts import CodeArtifact, TestArtifact
 from codegenerator.models.requests import GenerationRequest, RepairRequest
 from codegenerator.models.results import GenerationResult
+from codegenerator.parsing.json_utils import parse_json_object
+from codegenerator.prompts.review_prompt_builder import GeneratedTestFailureReviewPromptBuilder
 from codegenerator.prompts.prompt_builder import (
     build_coder_user_prompt,
     build_planner_user_prompt,
@@ -1107,3 +1109,177 @@ def repair(request: RepairRequest, config_path: str) -> GenerationResult:
             error_type=type(exc).__name__,
             message=str(exc),
         )
+
+
+
+
+
+_REVIEW_LIST_FIELDS = {'reasons', 'production_risks', 'test_issues'}
+_REVIEW_ALLOWED_VERDICTS = {
+    'production_likely_ok_test_likely_bad',
+    'production_likely_bad_test_valid',
+    'both_uncertain',
+    'environment_or_import_issue',
+    'insufficient_context',
+}
+_REVIEW_ALLOWED_KEEP = {'yes', 'no', 'manual_review'}
+_REVIEW_ALLOWED_ACTIONS = {
+    'keep_production_code_exclude_test',
+    'reject_production_code',
+    'manual_review',
+    'rerun_test_generation',
+}
+
+
+def _as_review_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        return [stripped] if stripped else []
+    return [value]
+
+
+def _normalize_generated_test_review(review: Any) -> dict[str, Any]:
+    """Return a stable advisory-review payload for codecollector/codeui.
+
+    Models sometimes return scalar strings for list fields or slightly
+    inconsistent enum combinations. Normalize the machine contract without
+    changing the review into an automatic decision.
+    """
+    if not isinstance(review, dict):
+        return {
+            'verdict': 'insufficient_context',
+            'confidence': 0.0,
+            'production_code_quality': '',
+            'generated_test_quality': '',
+            'should_keep_production_code': 'manual_review',
+            'recommended_action': 'manual_review',
+            'reasons': ['Модель вернула review не в объектном JSON-формате.'],
+            'production_risks': [],
+            'test_issues': [],
+        }
+
+    normalized = dict(review)
+    for field in _REVIEW_LIST_FIELDS:
+        normalized[field] = _as_review_list(normalized.get(field))
+
+    verdict = str(normalized.get('verdict') or '').strip()
+    if verdict not in _REVIEW_ALLOWED_VERDICTS:
+        verdict = 'both_uncertain'
+    normalized['verdict'] = verdict
+
+    try:
+        confidence = float(normalized.get('confidence') or 0.0)
+    except Exception:
+        confidence = 0.0
+    normalized['confidence'] = max(0.0, min(1.0, confidence))
+
+    keep = str(normalized.get('should_keep_production_code') or '').strip()
+    if keep not in _REVIEW_ALLOWED_KEEP:
+        keep = 'manual_review'
+    action = str(normalized.get('recommended_action') or '').strip()
+    if action not in _REVIEW_ALLOWED_ACTIONS:
+        action = 'manual_review'
+
+    production_risks = normalized.get('production_risks') or []
+    test_issues = normalized.get('test_issues') or []
+    combined_issue_text = ' '.join(str(item).lower() for item in [*normalized.get('reasons', []), *test_issues])
+    constructor_or_call_issue = any(
+        marker in combined_issue_text
+        for marker in (
+            'missing required positional argument',
+            'missing required keyword-only argument',
+            'required positional argument',
+            'обязательн',
+            'конструктор',
+            'constructor',
+            '__init__',
+        )
+    )
+    if (
+        constructor_or_call_issue
+        and not production_risks
+        and verdict == 'environment_or_import_issue'
+    ):
+        verdict = 'production_likely_ok_test_likely_bad'
+        normalized['verdict'] = verdict
+        keep = 'yes'
+        action = 'keep_production_code_exclude_test'
+
+    if production_risks and keep == 'yes':
+        keep = 'manual_review'
+    if production_risks and action == 'keep_production_code_exclude_test':
+        action = 'manual_review'
+
+    normalized['should_keep_production_code'] = keep
+    normalized['recommended_action'] = action
+    for field in ('production_code_quality', 'generated_test_quality'):
+        normalized[field] = str(normalized.get(field) or '')
+    return normalized
+
+
+def review_generated_test_failure(request: dict[str, Any], config_path: str) -> dict[str, Any]:
+    config = load_config(config_path)
+    prompts = load_prompts(config)
+    client = create_client(config)
+    request_id = str(request.get('request_id') or 'review-generated-test-failure')
+    trace = _base_trace(request_id, 'review_generated_test_failure')
+    trace_path = build_trace_path(config.trace.output_dir, request_id)
+    try:
+        template = prompts.get('generated_test_review_user_template') or ''
+        builder = GeneratedTestFailureReviewPromptBuilder(template)
+        user_prompt, metrics = builder.build(request)
+        _log_prompt_size(
+            request_id=request_id,
+            step='generated_test_review',
+            user_prompt=user_prompt,
+            system_prompt=prompts['system_rules'],
+            total_prompt_limit=config.prompt_budget.repair_chars_limit,
+        )
+        parsed, raw, _meta = _call_llm_with_trace(
+            trace=trace,
+            trace_step='generated_test_review',
+            error_step='generated_test_review_error',
+            request_id=request_id,
+            client=client,
+            model=config.models.repair_model,
+            system_prompt=prompts['system_rules'],
+            user_prompt=user_prompt,
+            think=config.ollama.think,
+            config=config,
+            step_name_for_gateway='generated_test_review',
+            parser=parse_json_object,
+            extra_payload={'prompt_metrics': metrics},
+        )
+        parsed = _normalize_generated_test_review(parsed)
+        trace['normalized_review'] = parsed
+        if config.trace.save_to_file:
+            trace_path.parent.mkdir(parents=True, exist_ok=True)
+            trace_path.write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding='utf-8')
+        return {
+            'request_id': request_id,
+            'status': 'ok',
+            'review': parsed,
+            'trace_path': str(trace_path),
+            'llm_usage': trace.get('llm_usage') or {},
+            'error_type': None,
+            'message': None,
+        }
+    except Exception as exc:
+        if config.trace.save_to_file:
+            trace_path.parent.mkdir(parents=True, exist_ok=True)
+            trace_path.write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding='utf-8')
+        return {
+            'request_id': request_id,
+            'status': 'error',
+            'review': None,
+            'trace_path': str(trace_path),
+            'llm_usage': trace.get('llm_usage') or {},
+            'error_type': type(exc).__name__,
+            'message': str(exc),
+        }

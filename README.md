@@ -1,33 +1,32 @@
 # codegenerator
 
-`codegenerator` — внешний генератор production-кода, тестов и repair-артефактов для `codecollector`.
+`codegenerator` — внешний слой генерации для `codecollector`. Проект принимает структурированный JSON-запрос, собирает промпт по шаблонам, вызывает модель через Ollama-compatible endpoint, разбирает ответ модели и возвращает нормализованный JSON-результат.
 
-Проект принимает структурированный JSON-запрос, собирает prompt по шаблонам, вызывает модель через Ollama-compatible endpoint и возвращает нормализованный JSON-результат. `codegenerator` не индексирует проект, не выбирает target, не применяет patch и не запускает проверки проекта. Эти задачи выполняет `codecollector`.
+`codegenerator` не индексирует проект, не выбирает target, не применяет patch и не запускает проверки проекта. Эти задачи выполняет `codecollector`.
 
 ## Назначение
 
-`codegenerator` используется как отдельный слой генерации между orchestration-слоем `codecollector` и LLM.
+`codegenerator` используется как отдельный слой между orchestration-слоем `codecollector` и LLM.
 
 Основной сценарий работы:
 
-1. `codecollector` индексирует проект и выбирает target.
-2. `codecollector` собирает `project_context`, `reference_context` и request.
-3. `codecollector` вызывает CLI `codegenerator`.
-4. `codegenerator` собирает prompt, вызывает модель и нормализует ответ.
-5. `codegenerator` возвращает `GenerationResult`.
-6. `codecollector` применяет артефакт, запускает проверки и определяет итоговый статус run.
+1. `codecollector` индексирует проект, выбирает target и собирает проектный контекст.
+2. `codecollector` формирует structured request и вызывает CLI `codegenerator`.
+3. `codegenerator` собирает промпт по шаблонам, вызывает модель и нормализует ответ.
+4. `codegenerator` возвращает результат в JSON-формате.
+5. `codecollector` применяет результат в staging workspace, запускает проверки, выполняет repair при необходимости и определяет итоговый статус run.
 
 ## Границы ответственности
 
 ### Что делает codegenerator
 
-- Загружает `GenerationRequest` или `RepairRequest`.
+- Загружает `GenerationRequest`, `RepairRequest` или request для advisory review.
 - Применяет runtime budget strategy.
-- Собирает prompt для выбранного режима.
+- Собирает промпт для выбранного режима.
 - Вызывает LLM через Ollama-compatible endpoint.
 - Парсит raw-ответ модели.
-- Нормализует `code_artifact` или `test_artifact`.
-- Возвращает единый `GenerationResult`.
+- Нормализует `code_artifact`, `test_artifact` или review result.
+- Возвращает JSON-результат.
 - Сохраняет trace, prompt, raw output и usage-метрики.
 
 ### Что не делает codegenerator
@@ -38,10 +37,10 @@
 - Не применяет patch.
 - Не применяет `import_changes` к файлам.
 - Не запускает `compileall`, `pytest`, `ruff` или другие проверки проекта.
-- Не определяет финальный статус run.
+- Не определяет финальный статус pipeline run.
 - Не выполняет project-level semantic validation.
 
-Project-level verification и orchestration repair остаются ответственностью `codecollector`.
+Project-level verification, orchestration repair и принятие решения остаются ответственностью `codecollector` и пользователя.
 
 ## Поддерживаемые режимы
 
@@ -59,7 +58,7 @@ python -m codegenerator generate \
 
 ### generate-test
 
-Режим генерации тестового файла.
+Режим генерации pytest-файла.
 
 ```bash
 python -m codegenerator generate-test \
@@ -69,7 +68,7 @@ python -m codegenerator generate-test \
 
 Обычно возвращает заполненный `test_artifact` и пустой `code_artifact`.
 
-Если в request передан `generated_code_artifact`, тест строится по сгенерированному production-коду, а не по исходной версии target.
+Если в request передан `generated_code_artifact`, тест строится по сгенерированному production-коду, а не по старой версии target. Старый `full_file_source` используется только как справочный контекст для импортов, стиля, окружающего кода и ранее существовавшего публичного поведения.
 
 ### repair
 
@@ -81,7 +80,19 @@ python -m codegenerator repair \
   --config /path/to/config.yaml
 ```
 
-Repair возвращает результат в том же формате `GenerationResult`.
+Repair возвращает результат в формате `GenerationResult`.
+
+### review-generated-test-failure
+
+Режим advisory review для случая, когда production-код прошел базовые проверки, но сгенерированный тест не прошел verification.
+
+```bash
+python -m codegenerator review-generated-test-failure \
+  --request-file /path/to/generated_test_review_request.json \
+  --config /path/to/config.yaml
+```
+
+Режим анализирует компактный контекст от `codecollector` и возвращает JSON-рекомендацию для человека. Он не изменяет код, не запускает repair и не принимает окончательное решение.
 
 ## Входные данные
 
@@ -133,7 +144,10 @@ Repair возвращает результат в том же формате `Ge
     "contract_context": {
       "related_symbols": [],
       "previous_changes": []
-    }
+    },
+    "required_contracts": [],
+    "required_class_members": [],
+    "model_surfaces": []
   },
   "reference_context": {
     "reference_artifacts": []
@@ -159,6 +173,8 @@ Repair возвращает результат в том же формате `Ge
 - `project_context`;
 - `reference_context`;
 - `options`.
+
+Поле `target` сохраняет operation, insert scope и parent class между generation и repair.
 
 Пример:
 
@@ -193,16 +209,30 @@ Repair возвращает результат в том же формате `Ge
 }
 ```
 
-Поле `target` в `RepairRequest` является частью текущего контракта. Оно сохраняет operation, insert scope и parent class между generation и repair.
+### Generated test failure review request
+
+Request для `review-generated-test-failure` формируется `codecollector` и содержит компактный контекст:
+
+- исходный CR;
+- target;
+- production artifact;
+- production diff;
+- generated test artifact;
+- failed verification blocks;
+- issues;
+- фрагменты stdout/stderr;
+- advisory warnings, например `possible_existing_method_contract_lost`.
+
+Этот request не должен содержать весь context pack, большие related source excerpts и reference artifacts без необходимости.
 
 ## Project context
 
-`project_context` — основной источник проектной информации для prompt-а.
+`project_context` — основной источник проектной информации для промпта.
 
 Типичные блоки:
 
 - `module_outline` — краткая структура модуля;
-- `full_file_source` — полный исходник target-файла, если он передан;
+- `full_file_source` — исходник target-файла, если он передан;
 - `target_symbol` — исходный target или anchor;
 - `parent_symbol` — родительский symbol, если есть;
 - `class_members` — методы и поля класса;
@@ -210,11 +240,21 @@ Repair возвращает результат в том же формате `Ge
 - `recommended_tests` — рекомендуемые тесты;
 - `related_symbols` — связанные production symbols;
 - `contract_context` — связанные production-контракты;
-- `allowed_api_surface` — компактный список разрешенных вызовов.
+- `allowed_api_surface` — компактный список разрешенных вызовов;
+- `required_contracts` — обязательные production-контракты;
+- `required_class_members` — обязательные public members класса при замене класса;
+- `model_surfaces` — видимые поля и аргументы конструкторов моделей.
 
 ### allowed_api_surface
 
-`allowed_api_surface` — компактная, консервативная поверхность разрешенных вызовов. Она помогает planner, coder и repair не придумывать методы зависимостей.
+`allowed_api_surface` — компактная и консервативная поверхность разрешенных вызовов. Она помогает planner, coder и repair не придумывать методы зависимостей.
+
+Правила использования:
+
+- если `allowed_api_surface` передан, методы зависимостей должны совпадать с ним по `access_path` и имени метода;
+- нельзя заменять отсутствующий метод похожим именем;
+- нельзя придумывать широкий метод получения всех сущностей, если он не виден в surface;
+- если видимый production-контракт требует аргумент, новый symbol должен принять этот аргумент явно или получить его из видимого контекста.
 
 Пример:
 
@@ -253,13 +293,6 @@ Repair возвращает результат в том же формате `Ge
 }
 ```
 
-Правила использования:
-
-- если `Allowed API Surface` передан, методы зависимостей должны совпадать с ним по `access_path` и имени метода;
-- нельзя заменять отсутствующий метод похожим именем;
-- нельзя придумывать широкий метод получения всех сущностей, если он не виден в surface;
-- если видимый production-контракт требует аргумент, новый symbol должен принять этот аргумент явно или получить его из видимого контекста.
-
 ### contract_context
 
 `contract_context` содержит связанные production symbols, выбранные `codecollector`.
@@ -279,9 +312,37 @@ Repair возвращает результат в том же формате `Ge
 
 `contract_context` считается частью фактического проектного контекста. Его сигнатуры, import path и source excerpts используются как источник истины для вызовов соседних компонентов.
 
+### Обязательные production-контракты
+
+Если в request передан блок `required_contracts`, planner, coder и repair prompt считают его обязательным structural constraint. Generated production code должен вызвать перечисленные production-контракты и не должен заменять их ручной реализацией бизнес-логики в API/adapter-слое.
+
+Этот блок не является источником новых contracts: он только фиксирует contracts, уже выбранные `codecollector` из видимого project context и `allowed_api_surface`.
+
+### Обязательные члены класса
+
+Если в request передан блок `required_class_members`, planner, coder и repair prompt считают его обязательным structural constraint для `replace_symbol` класса.
+
+Generated class должен сохранить все members с `required=true`. Если существующий метод содержит заглушку или `NotImplementedError`, его нужно реализовать, а не удалять из класса.
+
+Этот блок формируется `codecollector` из текущего public surface класса и не является просьбой добавить новые методы.
+
+### Поверхности моделей
+
+Если в request передан блок `model_surfaces`, planner, coder, repair и generate-test prompt считают его источником допустимых полей и аргументов конструктора для видимых project models.
+
+Генератор не должен использовать похожие alias-поля, если их нет в `fields` или `constructor_fields`.
+
+Пример: для модели с полем `topic` нельзя использовать `title`, если `title` не указан в `model_surfaces`.
+
+### Contract attribute requirements
+
+Если в request передан блок `contract_attribute_requirements`, generate-test prompt использует его как обязательный источник полей, которые должны быть доступны на fake/stub или project model objects, передаваемых в production contract.
+
+Если используется реальная project model, test generator должен передавать только видимые `constructor_fields`. Если требуемое поле не является constructor field, его нужно задать после создания объекта или использовать локальный fake/stub.
+
 ## Выходной результат
 
-Все режимы возвращают `GenerationResult`.
+Все режимы генерации и repair возвращают `GenerationResult`.
 
 Поля:
 
@@ -340,7 +401,6 @@ Repair возвращает результат в том же формате `Ge
 
 - imports не добавляются внутрь `code_artifact.code`;
 - если новое имя используется в теле функции, type annotation, default value, decorator, context manager или helper call, оно должно быть отражено в `import_changes`;
-- `from __future__ import annotations` не является причиной пропускать import для явно использованного annotation type;
 - если imports не нужны, `import_changes` должен быть пустым массивом.
 
 ### TestArtifact
@@ -356,6 +416,32 @@ Repair возвращает результат в том же формате `Ge
 
 Все imports теста включаются прямо в `source_code`. `import_changes` для test artifact не используется.
 
+### Review result
+
+`review-generated-test-failure` возвращает JSON с advisory-рекомендацией.
+
+Основные поля:
+
+- `verdict`;
+- `confidence`;
+- `production_code_quality`;
+- `generated_test_quality`;
+- `should_keep_production_code`;
+- `recommended_action`;
+- `reasons`;
+- `production_risks`;
+- `test_issues`.
+
+Допустимые значения `verdict`:
+
+- `production_likely_ok_test_likely_bad`;
+- `production_likely_bad_test_valid`;
+- `both_uncertain`;
+- `environment_or_import_issue`;
+- `insufficient_context`.
+
+Review является advisory. Он не меняет код и не принимает решение за пользователя.
+
 ## Операции
 
 ### replace_symbol
@@ -368,6 +454,13 @@ Repair возвращает результат в том же формате `Ge
 - внешний контракт не меняется без явного требования;
 - `insert_scope` не применяется;
 - `import_changes` можно вернуть, если реализация требует imports.
+
+Если target symbol является классом:
+
+- `code` должен содержать полное новое определение этого же класса;
+- нельзя возвращать только top-level helper-functions, свободные функции или отдельные методы;
+- имя класса, публичные поля и существующие публичные методы сохраняются, если пользователь явно не просит переименовать или удалить их;
+- новое поведение модели или класса добавляется внутрь класса, если пользователь явно не попросил вынести его в свободные функции.
 
 ### insert_after_symbol + module_body
 
@@ -418,6 +511,24 @@ Planner готовит промежуточный план для generation-р�
 
 Нельзя добавлять в `preserve_literals` фрагменты старого кода, target source, related tests, planner wording или reference artifacts, если пользователь не написал эти значения явно.
 
+Для `replace_symbol` class-target planner должен планировать замену самого класса, а не добавление внешних helper-функций вместо методов класса.
+
+## Coder
+
+Coder генерирует production artifact.
+
+Он должен:
+
+- соблюдать operation;
+- соблюдать insert scope;
+- не менять anchor;
+- возвращать imports через `import_changes`;
+- использовать только видимые dependency methods;
+- не подставлять фиктивные literals вместо обязательных аргументов;
+- если возвращает dict из результата production-контракта, использовать только видимые поля результата;
+- если target является class и operation=`replace_symbol`, вернуть полное определение класса;
+- не заменять class-target набором свободных функций, если пользователь явно не попросил свободные функции.
+
 ## Repair planner
 
 Repair planner подготавливает короткий план исправления перед repair-кодером.
@@ -431,13 +542,95 @@ Repair planner подготавливает короткий план испра
 - `required_changes`;
 - `reason`.
 
-Рекомендуемая формулировка строгой схемы для prompt-а:
+Рекомендуемая формулировка строгой схемы для промпта:
 
 ```text
 JSON должен содержать только следующие ключи верхнего уровня: "status", "repair_objective", "allowed_calls_to_use", "forbidden_calls", "required_changes", "reason". Все эти ключи обязательны. Не добавляй другие ключи, не переименовывай ключи, не переводи имена ключей, не добавляй пробелы в начале или конце имени ключа, не используй похожие или сокращенные варианты. Имя каждого ключа должно совпадать с указанным списком посимвольно.
 ```
 
 Repair planner должен возвращать `repairable`, если ошибочный широкий сценарий можно заменить безопасным параметризованным видимым контрактом. `not_repairable` возвращается только если исправление требует нового production contract, нового dependency method, нового import path или несуществующего поля результата.
+
+## Repair
+
+Repair получает previous artifact и error context.
+
+Он должен:
+
+- исправлять previous artifact;
+- не генерировать новый сценарий с нуля;
+- сохранять operation и insert scope;
+- не заменять недоступный широкий сценарий другим широким методом;
+- использовать видимый параметризованный контракт;
+- возвращать результат в формате `GenerationResult`;
+- если repair исправляет class-target, результат должен оставаться полным определением класса;
+- если previous artifact вернул внешние функции вместо class-target, repair должен исправить это на полное определение класса.
+
+## Generate-test
+
+`generate-test` создает новый pytest-файл.
+
+Правила:
+
+- все imports находятся внутри `test_artifact.source_code`;
+- related tests определяют стиль тестов;
+- contract context задает production-сигнатуры и import path;
+- `contract_attribute_requirements` задает поля, которые должны быть доступны на fake/stub или project model objects, передаваемых в production contract;
+- тест не должен закреплять вызов production symbol с меньшим числом обязательных аргументов;
+- optional pytest plugin fixtures не используются;
+- `pytest` импортируется только если реально используется;
+- тест не проверяет anchor вместо нового symbol;
+- тест не должен придумывать поля, сигнатуры, зависимости и expected values.
+
+Если передан `generated_code_artifact`:
+
+- именно он является главным источником истины для теста;
+- старый `full_file_source` используется как справочный контекст для импортов, стиля, окружающего кода и старых публичных контрактов;
+- если `generated_code_artifact` и старый `full_file_source` противоречат друг другу по полям, constructor kwargs, методам или ключам dict, тест должен использовать `generated_code_artifact`.
+
+Пример:
+
+```python
+from pathlib import Path
+
+from support_app.storage.ticket_repository import TicketRepository
+
+
+def test_export_ticket_ids_writes_ids_one_per_line(tmp_path: Path) -> None:
+    repository = TicketRepository()
+    export_path = tmp_path / "ticket_ids.txt"
+
+    repository.export_ticket_ids(export_path)
+
+    assert export_path.exists()
+```
+
+## Review generated-test failure
+
+`review-generated-test-failure` анализирует ситуацию, когда production-код прошел базовые проверки, а generated test не прошел verification.
+
+Режим получает компактный контекст от `codecollector`:
+
+- исходный CR;
+- target;
+- production artifact;
+- production diff;
+- generated test;
+- failed verification blocks;
+- issues;
+- stdout/stderr excerpts;
+- advisory warnings.
+
+Режим не должен получать весь context pack, большие related source excerpts или reference artifacts без необходимости.
+
+Review должен различать:
+
+- generated test плохой;
+- generated test валидный и нашел production regression;
+- ошибка окружения или import path;
+- недостаточно контекста;
+- ситуация неясна.
+
+Результат review не является автоматическим решением.
 
 ## Prompt assembly
 
@@ -447,7 +640,7 @@ Prompt assembly должен быть объяснимым по trace.
 
 - prompt templates пишутся на русском языке;
 - шаблоны лежат в `prompts/`;
-- большие части prompt не зашиваются в Python-код;
+- большие части промпта не зашиваются в Python-код;
 - JSON-примеры внутри templates экранируются как `{{` и `}}`, потому что используется Python `.format(...)`;
 - reference artifacts используются только как дополнительный ориентир;
 - contract context и allowed API surface имеют приоритет над reference artifacts.
@@ -466,7 +659,7 @@ Coder должен опираться на контекст в таком пор
 8. related tests;
 9. reference artifacts.
 
-Если `planner_json` противоречит `Allowed API Surface`, production contracts или видимым полям результата, coder должен следовать проектному контексту и правилам безопасности.
+Если `planner_json` противоречит `allowed_api_surface`, production contracts или видимым полям результата, coder должен следовать проектному контексту и правилам безопасности.
 
 ### Приоритеты test prompt
 
@@ -480,42 +673,7 @@ Test generator должен опираться на контекст в тако
 6. full file source;
 7. reference artifacts.
 
-Если `insert_scope=class_body`, тест импортирует parent class, создает экземпляр и вызывает метод через экземпляр.
-
-Если fake/stub объект передается в target-код или production contract, fake/stub должен реализовать поля, которые target или contract source явно читает. Если в request передан `contract_attribute_requirements`, этот блок считается обязательным источником полей для test data.
-
-## Generate-test
-
-`generate-test` создает новый pytest-файл.
-
-Правила:
-
-- все imports находятся внутри `test_artifact.source_code`;
-- related tests определяют стиль тестов;
-- contract context задает production-сигнатуры и import path;
-- `contract_attribute_requirements` задает поля, которые должны быть доступны на fake/stub или project model objects, передаваемых в production contract;
-- тест не должен закреплять вызов production symbol с меньшим числом обязательных аргументов;
-- optional pytest plugin fixtures не используются;
-- `pytest` импортируется только если реально используется;
-- тест не проверяет anchor вместо нового symbol;
-- тест не должен придумывать поля, сигнатуры, зависимости и expected values.
-
-Пример:
-
-```python
-from pathlib import Path
-
-from support_app.storage.ticket_repository import TicketRepository
-
-
-def test_export_ticket_ids_writes_ids_one_per_line(tmp_path: Path) -> None:
-    repository = TicketRepository()
-    export_path = tmp_path / "ticket_ids.txt"
-
-    repository.export_ticket_ids(export_path)
-
-    assert export_path.exists()
-```
+Если `generated_code_artifact` и `full_file_source` противоречат друг другу, тест должен использовать `generated_code_artifact`.
 
 ## Budget strategy
 
@@ -570,52 +728,34 @@ Trace должен позволять восстановить:
 
 При разборе качества генерации важно смотреть не только итоговый JSON, но и фактический prompt, который получила модель.
 
-## Текущие проблемы и направления развития
+## Текущие ограничения
 
-Текущие ограничения:
-
-- primary coder иногда строит широкий сценарий получения всех сущностей, даже если `Allowed API Surface` такого метода не содержит;
-- repair planner может ошибаться в схеме JSON-ответа, если prompt недостаточно строго задает ключи;
-- repair может исправлять ошибку частично, если planner предлагает не тот безопасный контракт;
-- generate-test чувствителен к полноте related tests, full file source и contract context;
-- target selection выполняет `codecollector`, поэтому качество генерации зависит от корректного выбора target до вызова `codegenerator`.
-
-Ближайшие направления улучшения:
-
-- сделать `Allowed API Surface` обязательным и защищенным блоком planner/coder prompt;
-- валидировать `repair_planner_result` по строгой схеме до вызова repair coder;
-- предотвращать передачу в coder planner-инструкций, которые содержат неразрешенные dependency methods;
-- уменьшить влияние reference artifacts на планирование production-кода;
-- улучшить генерацию тестов через явное описание атрибутов, которые production-контракт читает у fake/stub объектов;
-- анализировать trace перед каждым изменением prompt или budget.
+- Primary coder может сгенерировать код, который требует repair.
+- Repair может изменить public API шире, чем требуется запросом.
+- Generate-test чувствителен к полноте и непротиворечивости контекста.
+- Review generated-test failure является advisory и не заменяет решение пользователя.
+- Качество результата зависит от target selection и project context, подготовленных `codecollector`.
 
 ## Структура проекта
 
 - `config.yaml` — конфигурация моделей, budget, prompt templates и trace;
-- `prompts/` — шаблоны prompt-ов;
+- `prompts/` — шаблоны промптов;
 - `codegenerator/models/` — request/result/artifact модели;
-- `codegenerator/orchestration/` — режимы `generate`, `generate-test`, `repair`;
-- `codegenerator/prompts/` — загрузка и сборка prompt;
+- `codegenerator/orchestration/` — режимы `generate`, `generate-test`, `repair`, `review-generated-test-failure`;
+- `codegenerator/prompts/` — загрузка и сборка промптов;
 - `codegenerator/generation/` — parsing и normalization результатов;
 - `codegenerator/llm/` — клиент Ollama-compatible endpoint;
 - `runs/` — trace-файлы вызовов модели.
 
 ## Что не нужно делать
 
-- Не подгонять prompt под один demo-case.
+- Не подгонять промпт под один demo-case.
 - Не переносить project semantics validation из `codecollector` в `codegenerator`.
-- Не добавлять проектно-зависимые константы в Python-код.
+- Не добавлять project-specific константы в Python-код.
 - Не добавлять import-строки внутрь `code_artifact.code`.
 - Не менять JSON-контракт без обновления интеграции и документации.
 - Не увеличивать budget только ради одной локальной ошибки, если проблему можно решить более точной структурой request или prompt.
 
 ## Итог
 
-`codegenerator` — слой генерации и нормализации LLM-ответа. Проект должен оставаться предсказуемым, объяснимым по trace и отделенным от поиска, применения patch и проверки проекта, которые выполняет `codecollector`.
-
-
-
-### Repair и contract attribute requirements
-
-Repair prompt получает тот же структурный контекст, что и generation, включая `allowed_api_surface`, `contract_context` и при наличии `contract_attribute_requirements`. Блок `contract_attribute_requirements` используется только как дополнительная подсказка о видимых полях моделей и contract-source reads; repair не должен придумывать новые поля или alias-имена.
-
+`codegenerator` — слой генерации, repair, test generation и advisory review. Проект должен оставаться предсказуемым, объяснимым по trace и отделенным от поиска, применения patch и проверки проекта, которые выполняет `codecollector`.     .     .  # Прошу обратить внимание, что этот файл может содержать незавершённую строку из-за копирования: в конце есть лишние точки/пробелы, их нужно удалить при правке файла.     # Если нужно, я могу подготовить чистую версию README.md отдельным файлом.  

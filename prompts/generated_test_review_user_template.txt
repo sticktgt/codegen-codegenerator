@@ -1,0 +1,90 @@
+Проанализируй результат генерации Python-кода. Основной код прошел базовые проверки, но сгенерированный тест не прошел verification.
+
+Верни только валидный JSON без markdown.
+
+Обязательные ключи JSON:
+- verdict
+- confidence
+- production_code_quality
+- generated_test_quality
+- should_keep_production_code
+- recommended_action
+- reasons
+- production_risks
+- test_issues
+
+Допустимые значения verdict:
+- production_likely_ok_test_likely_bad
+- production_likely_bad_test_valid
+- both_uncertain
+- environment_or_import_issue
+- insufficient_context
+
+Допустимые значения should_keep_production_code:
+- yes
+- no
+- manual_review
+
+Допустимые значения recommended_action:
+- keep_production_code_exclude_test
+- reject_production_code
+- manual_review
+- rerun_test_generation
+
+Общие правила:
+- Не принимай окончательное решение за пользователя. Дай рекомендацию для ручной проверки.
+- Оцени, соответствует ли основной код исходному запросу и видимому проектному контексту.
+- Оцени, относится ли ошибка к тесту, окружению запуска или основному коду.
+- Если контекста недостаточно для уверенного вывода, используй verdict="both_uncertain" или verdict="insufficient_context".
+- Ответ должен быть кратким, но понятным человеку, который решает: сохранять основной код или отклонить его.
+
+Правила оценки основного кода:
+- Если ошибка возникает при импорте, сборе тестов или выполнении теста из-за исключения внутри измененного основного модуля, считай это риском основного кода.
+- Если traceback указывает на отсутствующее имя, импорт, метод, поле, аннотацию, зависимость или ошибку исполнения внутри основного кода, считай это риском основного кода, если нет явного доказательства, что тест неверен.
+- Если основной код нарушает исходный запрос, видимый проектный контракт или уже существующее публичное поведение, не скрывай это за плохим тестом.
+- Для replace_symbol класса считай существующие публичные методы частью сохраняемого публичного поведения, если пользователь явно не просил менять или удалять их.
+- Если сгенерированный тест проверяет поведение существующего публичного метода, которое было явно описано в старом docstring, старом коде или verification context, не считай такой тест плохим только потому, что это поведение не было повторено в новом запросе.
+- Если verification context содержит предупреждение possible_existing_method_contract_lost, считай это риском основного кода, пока не увидишь явное указание пользователя изменить или удалить это поведение.
+
+Правила оценки теста:
+- Если тест использует несуществующие поля, методы, импорты, неверные аргументы конструктора или API, укажи это в test_issues.
+- Если generated test падает из-за вызова видимого project class/function/method без обязательных аргументов, указанных в видимой сигнатуре, считай это проблемой generated test, а не environment/import issue, если нет признаков ошибки production-кода.
+- Если тест проверяет поведение, которое не описано в запросе, старом публичном поведении, старом docstring, старом коде или видимом контексте, это может быть проблемой теста.
+- Если тест падает из-за проблемы в основном коде, не называй качество теста bad только из-за факта падения.
+
+Правила согласованности ответа:
+- Если production_risks содержит существенный риск основного кода, should_keep_production_code не может быть "yes". Используй "manual_review" или "no".
+- Если production_risks содержит существенный риск основного кода, recommended_action не должен быть "keep_production_code_exclude_test". Используй "manual_review" или "reject_production_code".
+- Если причины или production_risks указывают, что основной код мог нарушить существующее поведение или требования запроса, verdict не должен быть "production_likely_ok_test_likely_bad". Используй "production_likely_bad_test_valid" или "both_uncertain".
+- Если test_issues говорят, что тест корректен или в целом уместен, но основной код не запускается или нарушает поведение, generated_test_quality не должен быть "bad".
+- Поля verdict, should_keep_production_code и recommended_action должны быть логически согласованы с reasons, production_risks и test_issues.
+- Если production checks прошли, а единственная явная ошибка связана с неверным generated test usage проекта: отсутствующие обязательные аргументы, несуществующие constructor kwargs, неверный импорт или несуществующее поле, предпочитай verdict="production_likely_ok_test_likely_bad" и recommended_action="keep_production_code_exclude_test", если нет других production_risks.
+- Если сомневаешься, выбирай более осторожный вариант: verdict="both_uncertain", should_keep_production_code="manual_review", recommended_action="manual_review".
+
+Исходный запрос:
+{change_request_block}
+
+Target:
+{target_block}
+
+Основной сгенерированный код:
+```python
+{production_code_block}
+```
+
+Diff основного кода:
+```diff
+{production_diff_block}
+```
+
+Путь к сгенерированному тесту: {generated_test_path}
+Сгенерированный тест:
+```python
+{generated_test_block}
+```
+
+Контекст проверки:
+{verification_block}
+
+Дополнительный проектный контекст:
+{context_block}

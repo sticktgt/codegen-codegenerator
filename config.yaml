@@ -7,7 +7,7 @@ llm:
     think: false
     temperature: 0.0
     num_ctx: 16384 # 4096 
-    num_predict: 900 # 600 
+    num_predict: 4096 # 1600 # 600 
     keep_alive: 0
     options: {}
     #   num_thread: 6
@@ -24,6 +24,7 @@ codegenerator:
     test_generator_user_template: "prompts/test_generator_user_template.txt"
     test_generator_example: "prompts/test_example_pytest_raises.txt"
     test_planner_user_template: "prompts/test_planner_user_template.txt"
+    generated_test_review_user_template: "prompts/generated_test_review_user_template.txt"
 
   models:
     planner_model: "qwen3-coder-next" # "qwen3:14b-q4_K_M"  

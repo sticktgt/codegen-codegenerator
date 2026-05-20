@@ -5,7 +5,7 @@ from typing import Any
 import yaml
 from codegenerator.logger import get_logger
 from codegenerator.models.requests import GenerationRequest, RepairRequest
-from codegenerator.orchestration.generation_service import generate, repair, generate_test
+from codegenerator.orchestration.generation_service import generate, repair, generate_test, review_generated_test_failure
 
 logger = get_logger("codegenerator.api")
 
@@ -48,3 +48,8 @@ def generate_test_from_file(request_file: str | Path, config_path: str) -> dict:
     payload = _load_request(request_file)
     req = GenerationRequest(**payload)
     return generate_test(req, config_path).to_dict()
+
+
+def review_generated_test_failure_from_file(request_file: str | Path, config_path: str) -> dict:
+    payload = _load_request(request_file)
+    return review_generated_test_failure(payload, config_path)
