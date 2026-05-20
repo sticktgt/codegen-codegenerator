@@ -253,12 +253,171 @@ def _visible_return_fields_from_contracts(project_context: dict[str, Any]) -> di
     return {name: sorted(fields) for name, fields in fields_by_type.items()}
 
 
+def _method_doc_summary(docstring: str, max_chars: int = 120) -> str:
+    doc = " ".join(str(docstring or "").strip().split())
+    if not doc:
+        return ""
+    if len(doc) <= max_chars:
+        return doc
+    return doc[: max_chars - 1].rstrip() + "…"
+
+
+def _method_display_signature(item: dict[str, Any]) -> str:
+    signature = str(item.get("signature") or "").strip()
+    if signature:
+        return signature
+    name = str(item.get("name") or "").strip()
+    if name:
+        return f"def {name}(...)"
+    qualname = str(item.get("qualname") or "").strip()
+    return qualname or "method"
+
+
+def _same_class_method_priority(item: dict[str, Any]) -> tuple[int, int, str]:
+    """Order same-class methods so useful helpers are visible before truncation.
+
+    This order is intentionally not a hard recommendation. It only prevents
+    long class lifecycle methods such as __init__ from hiding small helper
+    methods when the prompt budget is tight.
+    """
+    name = str(item.get("name") or item.get("qualname") or "").lower()
+    if any(token in name for token in ("find", "lookup", "locate", "resolve")):
+        group = 0
+    elif "search" in name:
+        group = 1
+    elif any(token in name for token in ("load", "read", "open", "parse")):
+        group = 2
+    elif any(token in name for token in ("get", "build", "make", "create")):
+        group = 3
+    elif any(token in name for token in ("save", "write", "dump", "serialize")):
+        group = 4
+    elif name.startswith("__"):
+        group = 9
+    else:
+        group = 5
+    return (group, len(name), name)
+
+
+def _render_same_class_methods(project_context: dict[str, Any], max_chars: int = 1200) -> tuple[str, dict[str, Any]]:
+    methods = [item for item in (project_context.get("same_class_methods") or []) if isinstance(item, dict)]
+    if not methods:
+        return "none", {"same_class_methods_count": 0, "same_class_methods_chars": 0}
+
+    ordered_methods = sorted(methods, key=_same_class_method_priority)
+    method_names = []
+    for item in ordered_methods:
+        name = str(item.get("name") or "").strip()
+        qualname = str(item.get("qualname") or "").strip()
+        method_names.append(name or qualname or _method_display_signature(item))
+
+    summary_lines: list[str] = [
+        "Краткий список видимых методов того же класса:",
+        "Методы: " + ", ".join(method_names),
+    ]
+
+    # Render compact details in priority order. A one-line method name list is
+    # already present above, so even tight truncation keeps all available helper
+    # method names visible to the model.
+    for item in ordered_methods:
+        qualname = str(item.get("qualname") or "").strip()
+        signature = _method_display_signature(item)
+        doc = _method_doc_summary(str(item.get("docstring") or ""), max_chars=70)
+        prefix = f"- {qualname}" if qualname else f"- {signature}"
+        details = [prefix]
+        if signature and signature != qualname:
+            details.append(f"сигнатура: {signature}")
+        if doc:
+            details.append(f"описание: {doc}")
+        summary_lines.append("; ".join(details))
+
+    # Source excerpts are useful, but they must not hide the compact list above.
+    # Therefore excerpts are shown only for a few likely-relevant methods and after
+    # all method names and signatures have already been listed.
+    excerpt_lines: list[str] = []
+    excerpt_budget = max(0, max_chars - len("\n".join(summary_lines)) - 120)
+    if excerpt_budget > 220:
+        excerpt_lines.append("Короткие фрагменты наиболее релевантных методов того же класса:")
+        selected = ordered_methods[:3]
+        per_method_budget = max(140, min(320, excerpt_budget // max(1, len(selected))))
+        for item in selected:
+            source = str(item.get("source_excerpt") or "").strip()
+            if not source:
+                continue
+            qualname = str(item.get("qualname") or item.get("name") or "method").strip()
+            if len(source) > per_method_budget:
+                source = source[: per_method_budget - 1].rstrip() + "…"
+            excerpt_lines.append(f"- {qualname}:")
+            excerpt_lines.append(source)
+
+    rendered = "\n".join(summary_lines + excerpt_lines).strip() or "none"
+    original_chars = 0 if rendered == "none" else len(rendered)
+    if max_chars > 0 and rendered != "none" and len(rendered) > max_chars:
+        # Prefer preserving the method-name line and as many compact details as fit.
+        kept_lines: list[str] = []
+        running = 0
+        for line in summary_lines:
+            proposed = running + len(line) + (1 if kept_lines else 0)
+            if proposed > max_chars:
+                break
+            kept_lines.append(line)
+            running = proposed
+        rendered = "\n".join(kept_lines).strip()
+        if not rendered:
+            rendered, _ = _truncate_text("\n".join(summary_lines), max_chars)
+    return rendered, {
+        "same_class_methods_count": len(methods),
+        "same_class_methods_chars": len(rendered) if rendered != "none" else 0,
+        "same_class_methods_original_chars": original_chars,
+    }
+
+
+def _render_reuse_existing_logic(project_context: dict[str, Any], max_chars: int = 700) -> tuple[str, dict[str, Any]]:
+    reuse = project_context.get("reuse_existing_logic") or {}
+    if not isinstance(reuse, dict):
+        return "none", {"reuse_existing_logic_contracts": 0, "reuse_existing_logic_chars": 0}
+    mode = str(reuse.get("mode") or "none").strip()
+    contracts = [item for item in (reuse.get("contracts") or []) if isinstance(item, dict)]
+    if mode == "none" or not contracts:
+        return "none", {"reuse_existing_logic_contracts": 0, "reuse_existing_logic_chars": 0}
+    lines = [
+        f"Режим: {mode}",
+        f"Уверенность: {reuse.get('confidence', 0)}",
+    ]
+    reason = str(reuse.get("reason") or "").strip()
+    if reason:
+        lines.append(f"Причина: {reason}")
+    lines.append("Существующая логика, которую следует рассмотреть для переиспользования:")
+    for item in contracts:
+        qualname = str(item.get("qualname") or "").strip()
+        if not qualname:
+            continue
+        role = str(item.get("role") or "").strip()
+        item_reason = str(item.get("reason") or "").strip()
+        suffix = f" ({role})" if role else ""
+        lines.append(f"- {qualname}{suffix}")
+        if item_reason:
+            lines.append(f"  Причина: {item_reason}")
+    rendered = "\n".join(lines).strip() or "none"
+    original_chars = 0 if rendered == "none" else len(rendered)
+    if max_chars > 0 and rendered != "none" and len(rendered) > max_chars:
+        rendered, _ = _truncate_text(rendered, max_chars)
+    return rendered, {
+        "reuse_existing_logic_contracts": len(contracts),
+        "reuse_existing_logic_chars": len(rendered) if rendered != "none" else 0,
+        "reuse_existing_logic_original_chars": original_chars,
+    }
+
+
 def _render_visible_implementation_facts(
     project_context: dict[str, Any],
     max_chars: int = 1800,
 ) -> tuple[str, dict[str, Any]]:
     allowed_text, allowed_metrics = _render_allowed_api_surface(project_context, max_chars=max_chars)
     required_contracts_text, required_contracts_metrics = _render_required_contracts(project_context, max_chars=max(600, max_chars // 2))
+    required_members_text, required_members_metrics = _render_required_class_members(project_context, max_chars=max(600, max_chars // 2))
+    model_surfaces_text, model_surfaces_metrics = _render_model_surfaces(project_context, max_chars=max(700, max_chars // 2))
+    same_class_methods_text, same_class_methods_metrics = _render_same_class_methods(project_context, max_chars=max(700, max_chars // 2))
+    reuse_existing_logic_text, reuse_existing_logic_metrics = _render_reuse_existing_logic(project_context, max_chars=max(500, max_chars // 3))
     fields_by_type = _visible_return_fields_from_contracts(project_context)
 
     facts: list[str] = []
@@ -269,6 +428,22 @@ def _render_visible_implementation_facts(
     if required_contracts_text and required_contracts_text != "none":
         facts.append("Required production contract calls (must be used by generated code):")
         facts.append(required_contracts_text)
+
+    if required_members_text and required_members_text != "none":
+        facts.append("Required class members for class replacement (must be preserved unless explicitly removed by user):")
+        facts.append(required_members_text)
+
+    if same_class_methods_text and same_class_methods_text != "none":
+        facts.append("Видимые методы того же класса:")
+        facts.append(same_class_methods_text)
+
+    if reuse_existing_logic_text and reuse_existing_logic_text != "none":
+        facts.append("Подсказки по переиспользованию существующих методов проекта:")
+        facts.append(reuse_existing_logic_text)
+
+    if model_surfaces_text and model_surfaces_text != "none":
+        facts.append("Visible model surfaces (valid fields and constructor arguments):")
+        facts.append(model_surfaces_text)
 
     if fields_by_type:
         facts.append("Visible return fields:")
@@ -283,6 +458,10 @@ def _render_visible_implementation_facts(
     return rendered, {
         **allowed_metrics,
         **required_contracts_metrics,
+        **required_members_metrics,
+        **model_surfaces_metrics,
+        **same_class_methods_metrics,
+        **reuse_existing_logic_metrics,
         "visible_implementation_facts_chars": len(rendered) if rendered != "none" else 0,
         "visible_implementation_facts_original_chars": original_chars,
         "visible_return_types": sorted(fields_by_type),
@@ -372,11 +551,16 @@ def _render_contract_context(
         blocks.append("\n".join(lines))
         qualnames.append(qualname)
 
+    model_surfaces_text, model_surfaces_metrics = _render_model_surfaces(project_context, max_chars=max(800, per_item_chars))
+    if model_surfaces_text and model_surfaces_text != "none":
+        blocks.append("Visible model surfaces (valid fields and constructor arguments):\n" + model_surfaces_text)
+
     rendered = "\n\n---\n\n".join(blocks) if blocks else "none"
     metrics = {
         "contract_symbols_count": len(blocks),
         "contract_symbol_chars": total_chars,
         "contract_symbol_qualnames": qualnames,
+        **model_surfaces_metrics,
     }
     return rendered, metrics
 
@@ -417,6 +601,80 @@ def _render_required_contracts(
         "required_contracts_count": len(compact),
         "required_contracts_chars": len(rendered),
         "required_contracts_original_chars": original_chars,
+    }
+
+
+def _render_required_class_members(
+    project_context: dict[str, Any],
+    max_chars: int = 1200,
+) -> tuple[str, dict[str, Any]]:
+    members = project_context.get("required_class_members") or (
+        (project_context.get("contract_context") or {}).get("required_class_members")
+    ) or []
+    compact: list[dict[str, Any]] = []
+    for item in members:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        compact.append({
+            "name": name,
+            "kind": str(item.get("kind") or "method"),
+            "required": bool(item.get("required", True)),
+            "sources": list(item.get("sources") or []),
+            "exclusion_reason": str(item.get("exclusion_reason") or ""),
+        })
+    if not compact:
+        return "none", {"required_class_members_count": 0, "required_class_members_chars": 0}
+    rendered = _pretty(compact)
+    original_chars = len(rendered)
+    if max_chars > 0 and len(rendered) > max_chars:
+        rendered, _ = _truncate_text(rendered, max_chars)
+    return rendered, {
+        "required_class_members_count": len(compact),
+        "required_class_members_chars": len(rendered),
+        "required_class_members_original_chars": original_chars,
+    }
+
+
+def _render_model_surfaces(
+    project_context: dict[str, Any],
+    max_chars: int = 1400,
+) -> tuple[str, dict[str, Any]]:
+    surfaces = project_context.get("model_surfaces") or (
+        (project_context.get("contract_context") or {}).get("model_surfaces")
+    ) or []
+    compact: list[dict[str, Any]] = []
+    for item in surfaces:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        qualname = str(item.get("qualname") or "").strip()
+        fields = [str(value) for value in (item.get("fields") or item.get("model_fields") or []) if str(value)]
+        constructor_fields = [str(value) for value in (item.get("constructor_fields") or []) if str(value)]
+        if not name and qualname:
+            name = qualname.rsplit(".", 1)[-1]
+        if not name or (not fields and not constructor_fields):
+            continue
+        compact.append({
+            "name": name,
+            "qualname": qualname,
+            "fields": sorted(set(fields) | set(constructor_fields)),
+            "constructor_fields": constructor_fields,
+            "required_constructor_fields": list(item.get("required_constructor_fields") or []),
+            "source": str(item.get("source") or ""),
+        })
+    if not compact:
+        return "none", {"model_surfaces_count": 0, "model_surfaces_chars": 0}
+    rendered = _pretty(compact)
+    original_chars = len(rendered)
+    if max_chars > 0 and len(rendered) > max_chars:
+        rendered, _ = _truncate_text(rendered, max_chars)
+    return rendered, {
+        "model_surfaces_count": len(compact),
+        "model_surfaces_chars": len(rendered),
+        "model_surfaces_original_chars": original_chars,
     }
 
 
@@ -743,6 +1001,16 @@ def build_test_planner_user_prompt(
                 runtime_config.prompt_assembly.test_planner_inferred_symbols_chars,
             )
 
+    source_priority_text = ""
+    if target_source_origin == "generated_code_artifact":
+        source_priority_text = (
+            "Главный источник истины для теста — сгенерированный target-код выше. "
+            "Полный исходный текст целевого файла ниже является справочным контекстом до изменения: "
+            "используй его для импортов, стиля и окружающего кода. "
+            "Если сгенерированный target-код и старый исходный файл противоречат друг другу "
+            "по полям, аргументам конструктора, методам или ключам словаря, используй сгенерированный target-код."
+        )
+
     values = {
         "request": compact_request_text,
         "target_file": request.target.get("file_path", ""),
@@ -756,7 +1024,7 @@ def build_test_planner_user_prompt(
         "related_tests_block": _render_optional_block("Связанные тесты проекта", related_tests_text),
         "import_context_block": _render_optional_block("Импорты из целевого файла", import_context_text),
         "inferred_symbols_block": _render_optional_block("Символы проекта из target-кода", inferred_symbols_text),
-        "source_priority_block": "",
+        "source_priority_block": _render_optional_block("Приоритет источников для теста", source_priority_text),
         "reference_context_block": reference_context_block,
         "contract_context_block": contract_context_block,
         "contract_attribute_requirements_block": contract_attribute_block,
@@ -1452,6 +1720,7 @@ def _build_repair_problem_block(
 
     for block in failed_blocks:
         block_name = str(block.get("name") or "")
+        details = block.get("details") or {}
         for issue in block.get("issues") or []:
             code = str(issue.get("code") or "")
             message = str(issue.get("message") or "")
@@ -1476,6 +1745,47 @@ def _build_repair_problem_block(
                     "related symbols, or contract context. If no such method exists, choose a visible contract "
                     "or make the required value an explicit parameter of the new symbol."
                 )
+            elif code in {"unknown_self_attribute", "unknown_self_method", "unknown_injected_dependency_attribute"}:
+                self_details = details.get("self_attribute_usage_check") or {}
+                injected_details = details.get("injected_dependency_method_check") or {}
+                visible_attributes = self_details.get("known_attributes") or []
+                visible_methods = self_details.get("known_methods") or []
+                unknown_attributes = self_details.get("unknown_attributes") or []
+                unknown_methods = self_details.get("unknown_methods") or []
+                item["repair_objective"] = (
+                    "Remove every use of the unknown self attribute or unknown self method from the repaired code. "
+                    "Use only visible_attributes or visible_methods. If suggested_replacements are provided, "
+                    "prefer them. Do not add a new alias, underscore field, or private helper call unless the "
+                    "requested operation explicitly asks to add that new method."
+                )
+                item["visible_attributes"] = visible_attributes
+                item["visible_methods"] = visible_methods
+                item["unknown_attributes"] = unknown_attributes
+                item["unknown_methods"] = unknown_methods
+                if injected_details:
+                    item["visible_dependency_types"] = injected_details.get("injected_attribute_types") or {}
+                    item["known_methods_by_type"] = injected_details.get("known_methods_by_type") or {}
+            elif code == "unknown_runtime_name":
+                runtime_details = details.get("runtime_name_check") or {}
+                item["repair_objective"] = (
+                    "If the name is required, add the missing import through import_changes. "
+                    "If an existing visible name can be used instead, replace the unknown name. "
+                    "Do not leave unresolved names in repaired production code."
+                )
+                item["unknown_names"] = runtime_details.get("unknown_names") or []
+            elif code == "model_constructor_field_type_mismatch":
+                model_details = details.get("model_surface_usage_check") or {}
+                mismatches: list[dict[str, Any]] = []
+                for checked_call in model_details.get("checked_constructor_calls") or []:
+                    for mismatch in checked_call.get("field_type_mismatches") or []:
+                        entry = dict(mismatch)
+                        entry["class_name"] = checked_call.get("class_name")
+                        mismatches.append(entry)
+                item["repair_objective"] = (
+                    "Before constructing the project model, convert serialized values to the visible field types. "
+                    "Do not pass raw JSON/dict/file/service values into non-primitive model fields."
+                )
+                item["field_type_mismatches"] = mismatches[:5]
             problems.append(item)
 
     if not problems:
@@ -1565,6 +1875,14 @@ def build_repair_user_prompt(
         "Required production contract calls",
         _normalize_optional_value(required_contracts_text),
     )
+    required_members_text, _required_members_metrics = _render_required_class_members(
+        project_context,
+        max_chars=_block_limit(runtime_config, "generate_block_chars", "required_class_members", 1000),
+    )
+    required_class_members_block = _render_optional_block(
+        "Required class members",
+        _normalize_optional_value(required_members_text),
+    )
     syntax_error_block = _build_repair_syntax_error_block(
         request.error_context or {},
     )
@@ -1609,6 +1927,7 @@ def build_repair_user_prompt(
         "contract_context_block": contract_context_block,
         "contract_attribute_requirements_block": contract_attribute_requirements_block,
         "required_contracts_block": required_contracts_block,
+        "required_class_members_block": required_class_members_block,
     }
 
     prompt = template_text.format(**values)
@@ -1630,6 +1949,11 @@ def build_repair_user_prompt(
     if hard_limit and len(prompt) > hard_limit and values.get("required_contracts_block"):
         values["required_contracts_block"] = ""
         trim_steps.append("removed required_contracts_block")
+        prompt = _rerender()
+
+    if hard_limit and len(prompt) > hard_limit and values.get("required_class_members_block"):
+        values["required_class_members_block"] = ""
+        trim_steps.append("removed required_class_members_block")
         prompt = _rerender()
 
     if hard_limit and len(prompt) > hard_limit and values["module_outline_block"]:
@@ -1821,6 +2145,7 @@ def _build_test_prompt_values(
     contract_context_block: str = "",
     contract_attribute_requirements_block: str = "",
     required_imports_text: str = "",
+    source_priority_text: str = "",
 ) -> dict[str, str]:
     target_block = _render_optional_block("Сгенерированный target-код", target_source)
     example_block = _render_optional_block("Пример теста", example_text)
@@ -1831,7 +2156,7 @@ def _build_test_prompt_values(
         inferred_symbols_text,
     )
     full_file_source_block = _render_optional_block(
-        "Полный исходный текст целевого файла",
+        "Справочный контекст целевого файла до изменения",
         full_file_source_text,
     )
     test_plan_block = _render_optional_block(
@@ -1857,7 +2182,7 @@ def _build_test_prompt_values(
         "request": compact_request_text,
         "module_outline": "[]",
         "module_outline_block": "",
-        "source_priority_block": "",
+        "source_priority_block": _render_optional_block("Приоритет источников для теста", source_priority_text),
         "target_function_block": target_block,
         "full_file_source": full_file_source_text,
         "full_file_source_block": full_file_source_block,
@@ -1982,6 +2307,13 @@ def build_test_generator_user_prompt(
     )
 
     full_file_source_text = str(pc.get("full_file_source", "") or "").strip()
+    source_priority_text = ""
+    if target_source_origin == "generated_code_artifact":
+        source_priority_text = (
+            "Главный источник истины для теста — сгенерированный target-код. "
+            "Справочный контекст целевого файла до изменения используй только для импортов, стиля и окружающего кода. "
+            "Если справочный контекст противоречит сгенерированному target-коду по полям, аргументам конструктора, методам или ключам словаря, используй сгенерированный target-код."
+        )
 
     related_tests_text, related_test_metrics = _render_related_tests(
         pc,
@@ -2109,6 +2441,7 @@ def build_test_generator_user_prompt(
             contract_context_block=contract_context_block,
             contract_attribute_requirements_block=contract_attribute_requirements_block,
             required_imports_text=required_imports_text,
+            source_priority_text=source_priority_text,
         )
         prompt_value = template_text.format(**values)
         if "{reference_context_block}" not in template_text and values.get("reference_context_block"):

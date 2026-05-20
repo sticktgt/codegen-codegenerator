@@ -20,4 +20,5 @@ def load_prompts(config: RuntimeConfig) -> dict[str, str]:
         'test_generator_user_template': read_prompt_file(config.prompts.test_generator_user_template),
         'test_generator_example_source': read_prompt_file(config.prompts.test_generator_example),
         'test_planner_user_template': read_prompt_file(config.prompts.test_planner_user_template),
+        'generated_test_review_user_template': read_prompt_file(config.prompts.generated_test_review_user_template),
     }
