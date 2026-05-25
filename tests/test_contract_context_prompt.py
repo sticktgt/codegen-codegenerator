@@ -342,6 +342,77 @@ def test_test_generator_prompt_requires_project_names_to_be_imported_or_defined(
     assert 'явно импортирован из видимого project module' in template
 
 
+def test_test_generation_prompts_include_required_project_imports_from_model_surfaces() -> None:
+    config = load_config('config.yaml')
+    request = _request()
+    request.change_request = {
+        'title': 'Полнотекстовый поиск с результатами',
+        'description': 'Новый метод должен возвращать SearchResult.',
+        'constraints': [
+            'Создавать SearchResult только с видимыми аргументами note, preview и match_positions.',
+        ],
+        'notes': [],
+    }
+    request.project_context['model_surfaces'] = [
+        {
+            'name': 'SearchResult',
+            'qualname': 'note.note_search.SearchResult',
+            'constructor_fields': ['note', 'preview', 'match_positions'],
+            'fields': ['note', 'preview', 'match_positions'],
+        }
+    ]
+    request.project_context['contract_context']['related_symbols'] = [
+        {
+            'qualname': 'note.note_search.build_context_fragment',
+            'file_path': 'note/note_search.py',
+            'kind': 'function',
+            'role': 'required_reuse_contract',
+            'signature': 'def build_context_fragment(text: str, query: str, max_length: int = 50) -> str:',
+            'source_excerpt': 'def build_context_fragment(text, query, max_length=50):\n    return text[:max_length]\n',
+        },
+        {
+            'qualname': 'note.note_search.find_match_positions',
+            'file_path': 'note/note_search.py',
+            'kind': 'function',
+            'role': 'required_reuse_contract',
+            'signature': 'def find_match_positions(text: str, query: str) -> list[int]:',
+            'source_excerpt': 'def find_match_positions(text, query):\n    return []\n',
+        },
+    ]
+    planner_template = Path('prompts/test_planner_user_template.txt').read_text(encoding='utf-8')
+    generator_template = Path('prompts/test_generator_user_template.txt').read_text(encoding='utf-8')
+
+    planner_prompt, _ = build_test_planner_user_prompt(
+        planner_template,
+        request,
+        runtime_config=config,
+        generated_code_artifact={
+            'code': 'def search_results_by_content(self, query):\n    return [SearchResult(note=None, preview="", match_positions=[])]\n',
+        },
+        available_user_chars=30000,
+    )
+    generator_prompt, _ = build_test_generator_user_prompt(
+        generator_template,
+        request,
+        generated_test_file='tests/test_generated.py',
+        example_test_source='',
+        runtime_config=config,
+        available_user_chars=30000,
+        generated_code_artifact={
+            'code': 'def search_results_by_content(self, query):\n    return [SearchResult(note=None, preview="", match_positions=[])]\n',
+        },
+        test_plan={'must_use_symbols': ['note.note_search.SearchResult']},
+    )
+
+    expected_import = 'from note.note_search import SearchResult, build_context_fragment, find_match_positions'
+    assert 'Required project imports' in planner_prompt
+    assert expected_import in planner_prompt
+    assert 'Required project imports' in generator_prompt
+    assert expected_import in generator_prompt
+    assert 'Не создавай экземпляр project class через `__new__`' in generator_prompt
+    assert 'Не вызывай методы project object, которых нет' in generator_prompt
+
+
 def test_coder_prompt_rejects_placeholder_literals_for_contract_args() -> None:
     from pathlib import Path
 
@@ -406,3 +477,375 @@ def test_repair_problem_block_mentions_contract_placeholder_objective() -> None:
     assert 'Критическая ошибка для repair' in block
     assert 'placeholder literal' in block
     assert 'build_agent_summary' in block
+
+
+def test_required_project_imports_for_test_prompt_does_not_import_class_methods_as_top_level_functions():
+    from codegenerator.models.requests import GenerationRequest
+    from codegenerator.config import load_config
+    from codegenerator.prompts.prompt_builder import build_test_generator_user_prompt
+
+    template = '{required_imports_block}'
+    request = GenerationRequest(
+        request_id='test',
+        mode='generate_test',
+        change_request={
+            'title': 'Добавить метод поиска',
+            'description': 'Метод должен использовать search_by_content и возвращать SearchResult.',
+            'constraints': [],
+        },
+        target={
+            'qualname': 'note.note_storage.NoteStorage',
+            'file_path': 'note/note_storage.py',
+            'operation': 'insert_after_symbol',
+            'insert_scope': 'class_body',
+            'expected_new_symbol_kind': 'method',
+            'parent_qualname': 'note.note_storage.NoteStorage',
+        },
+        project_context={
+            'contract_context': {
+                'related_symbols': [
+                    {
+                        'kind': 'class',
+                        'name': 'NoteStorage',
+                        'qualname': 'note.note_storage.NoteStorage',
+                        'module_name': 'note.note_storage',
+                    },
+                    {
+                        'kind': 'method',
+                        'name': 'search_by_content',
+                        'qualname': 'note.note_storage.NoteStorage.search_by_content',
+                        'parent_qualname': 'note.note_storage.NoteStorage',
+                        'module_name': 'note.note_storage',
+                        'role': 'required_reuse_contract',
+                    },
+                    {
+                        'kind': 'class',
+                        'name': 'SearchResult',
+                        'qualname': 'note.note_search.SearchResult',
+                        'module_name': 'note.note_search',
+                    },
+                ]
+            },
+            'model_surfaces': [
+                {
+                    'name': 'SearchResult',
+                    'qualname': 'note.note_search.SearchResult',
+                    'constructor_fields': ['note', 'preview', 'match_positions'],
+                }
+            ],
+        },
+        options={},
+    )
+
+    prompt, _ = build_test_generator_user_prompt(
+        template,
+        request,
+        generated_test_file='tests/test_generated.py',
+        example_test_source='',
+        runtime_config=load_config(),
+        available_user_chars=20000,
+        generated_code_artifact={
+            'code': 'def search_results_by_content(self, query):\n    return []',
+            'insert_scope': 'class_body',
+            'expected_new_symbol_kind': 'method',
+            'target_qualname': 'note.note_storage.NoteStorage',
+        },
+        test_plan={
+            'must_use_symbols': [
+                'note.note_storage.NoteStorage.search_results_by_content',
+                'note.note_storage.NoteStorage.search_by_content',
+                'note.note_search.SearchResult',
+            ]
+        },
+    )
+
+    assert 'from note.note_storage import NoteStorage' in prompt
+    assert 'search_by_content' not in prompt.split('from note.note_storage import', 1)[1].split('\n', 1)[0]
+    assert 'from note.note_search import SearchResult' in prompt
+
+
+def test_production_required_imports_do_not_import_class_methods_from_contract_context() -> None:
+    from pathlib import Path
+    from codegenerator.config import load_config
+    from codegenerator.prompts.prompt_builder import build_coder_user_prompt
+
+    template = Path('prompts/coder_user_template.txt').read_text(encoding='utf-8')
+    config = load_config('config.yaml')
+    request = _request()
+    request.change_request = {
+        'title': 'Добавить метод поиска',
+        'description': 'Метод должен использовать search_by_content и возвращать SearchResult.',
+        'constraints': [],
+        'notes': [],
+    }
+    request.project_context['required_contracts'] = [
+        {
+            'name': 'build_context_fragment',
+            'qualname': 'note.note_search.build_context_fragment',
+            'signature': 'def build_context_fragment(text: str, query: str, max_length: int = 50) -> str:',
+        }
+    ]
+    request.project_context['contract_context']['related_symbols'] = [
+        {
+            'kind': 'method',
+            'name': 'search_by_content',
+            'qualname': 'note.note_storage.NoteStorage.search_by_content',
+            'parent_qualname': 'note.note_storage.NoteStorage',
+            'module_name': 'note.note_storage',
+            'role': 'required_reuse_contract',
+        },
+        {
+            'kind': 'function',
+            'name': 'build_context_fragment',
+            'qualname': 'note.note_search.build_context_fragment',
+            'module_name': 'note.note_search',
+            'role': 'required_reuse_contract',
+        },
+    ]
+    request.project_context['model_surfaces'] = [
+        {
+            'name': 'SearchResult',
+            'qualname': 'note.note_search.SearchResult',
+            'constructor_fields': ['note', 'preview', 'match_positions'],
+        }
+    ]
+
+    prompt, _ = build_coder_user_prompt(
+        template,
+        request,
+        planner_result={'explicit_requirements': ['использовать search_by_content']},
+        runtime_config=config,
+        available_user_chars=30000,
+    )
+
+    assert 'from note.note_search import SearchResult, build_context_fragment' in prompt
+    assert 'from note.note_storage import search_by_content' not in prompt
+    assert 'from note.note_storage import NoteStorage' not in prompt
+
+
+def test_repair_prompt_renders_required_import_changes_for_unknown_names() -> None:
+    from pathlib import Path
+    from codegenerator.config import load_config
+    from codegenerator.models.requests import RepairRequest
+    from codegenerator.prompts.prompt_builder import build_repair_user_prompt
+
+    template = Path('prompts/repair_user_template.txt').read_text(encoding='utf-8')
+    config = load_config('config.yaml')
+    request = RepairRequest(
+        request_id='repair-imports',
+        mode='repair',
+        previous_generation_request_id='generate-imports',
+        change_request={
+            'title': 'Полнотекстовый поиск с результатами',
+            'description': 'Новый метод должен возвращать SearchResult.',
+            'constraints': [
+                'Для контекстного фрагмента использовать build_context_fragment.',
+                'Для позиций совпадений использовать find_match_positions.',
+            ],
+            'notes': [],
+        },
+        error_context={
+            'verification_summary': {
+                'failed_blocks': [
+                    {
+                        'name': 'patch_static_semantics',
+                        'issues': [
+                            {
+                                'code': 'unknown_runtime_name',
+                                'message': 'uses `SearchResult` but it is not imported',
+                                'unknown_names': ['SearchResult', 'build_context_fragment', 'find_match_positions'],
+                            }
+                        ],
+                    }
+                ]
+            }
+        },
+        previous_artifact={
+            'operation': 'insert_after_symbol',
+            'target_file': 'note/note_storage.py',
+            'target_qualname': 'note.note_storage.NoteStorage',
+            'insert_after': 'note.note_storage.NoteStorage',
+            'code': 'def search_results_by_content(self, query):\n    return [SearchResult(note=None, preview="", match_positions=[])]',
+        },
+        project_context={
+            'target_symbol': {
+                'qualname': 'note.note_storage.NoteStorage',
+                'name': 'NoteStorage',
+                'kind': 'class',
+                'source': 'class NoteStorage:\n    pass\n',
+            },
+            'required_contracts': [
+                {'qualname': 'note.note_search.build_context_fragment', 'name': 'build_context_fragment'},
+                {'qualname': 'note.note_search.find_match_positions', 'name': 'find_match_positions'},
+            ],
+            'model_surfaces': [
+                {'name': 'SearchResult', 'qualname': 'note.note_search.SearchResult'},
+            ],
+            'contract_context': {'related_symbols': []},
+            'module_outline': [],
+        },
+        target={'file_path': 'note/note_storage.py', 'qualname': 'note.note_storage.NoteStorage'},
+    )
+
+    prompt = build_repair_user_prompt(template, request, runtime_config=config)
+
+    assert 'Required repair import_changes' in prompt
+    assert '"module": "note.note_search"' in prompt
+    assert '"SearchResult"' in prompt
+    assert '"build_context_fragment"' in prompt
+    assert '"find_match_positions"' in prompt
+    assert 'обязательно включи перечисленные элементы в поле import_changes' in prompt
+
+
+def test_test_prompts_include_target_derived_strategy_for_self_helpers() -> None:
+    config = load_config('config.yaml')
+    request = _request()
+    request.target.update({
+        'qualname': 'support_app.storage.NoteStorage',
+        'file_path': 'support_app/storage.py',
+        'operation': 'insert_after_symbol',
+        'insert_scope': 'class_body',
+        'expected_new_symbol_kind': 'method',
+        'parent_qualname': 'support_app.storage.NoteStorage',
+    })
+    artifact = {
+        'operation': 'insert_after_symbol',
+        'insert_scope': 'class_body',
+        'expected_new_symbol_kind': 'method',
+        'parent_qualname': 'support_app.storage.NoteStorage',
+        'code': (
+            'def search_results(self, query):\n'
+            '    notes = self.search_by_content(query)\n'
+            '    return [build_preview(note.content, query) for note in notes]\n'
+        ),
+    }
+    planner_template = Path('prompts/test_planner_user_template.txt').read_text(encoding='utf-8')
+    generator_template = Path('prompts/test_generator_user_template.txt').read_text(encoding='utf-8')
+
+    planner_prompt, _ = build_test_planner_user_prompt(
+        planner_template,
+        request,
+        runtime_config=config,
+        generated_code_artifact=artifact,
+        available_user_chars=20000,
+    )
+    generator_prompt, _ = build_test_generator_user_prompt(
+        generator_template,
+        request,
+        generated_test_file='tests/test_generated.py',
+        example_test_source='',
+        runtime_config=config,
+        available_user_chars=20000,
+        generated_code_artifact=artifact,
+        test_plan={'target_symbol': 'support_app.storage.NoteStorage.search_results'},
+    )
+
+    for prompt in (planner_prompt, generator_prompt):
+        assert 'Target-derived test data strategy' in prompt
+        assert 'search_by_content' in prompt
+        assert 'не создавай скрытые атрибуты состояния' in prompt
+        assert 'patch должен менять binding в модуле target-кода' in prompt
+
+
+def test_test_prompts_include_parent_constructor_path_guidance() -> None:
+    config = load_config('config.yaml')
+    request = _request()
+    request.target.update({
+        'qualname': 'support_app.storage.NoteStorage',
+        'file_path': 'support_app/storage.py',
+        'operation': 'insert_after_symbol',
+        'insert_scope': 'class_body',
+        'expected_new_symbol_kind': 'method',
+        'parent_qualname': 'support_app.storage.NoteStorage',
+    })
+    request.project_context['full_file_source'] = (
+        'from pathlib import Path\n\n'
+        'class NoteStorage:\n'
+        '    def __init__(self, base_dir: Path) -> None:\n'
+        '        self.base_dir = base_dir\n'
+        '    def search_by_content(self, query: str):\n'
+        '        return []\n'
+    )
+    artifact = {
+        'operation': 'insert_after_symbol',
+        'insert_scope': 'class_body',
+        'expected_new_symbol_kind': 'method',
+        'parent_qualname': 'support_app.storage.NoteStorage',
+        'code': (
+            'def search_results(self, query):\n'
+            '    notes = self.search_by_content(query)\n'
+            '    return notes\n'
+        ),
+    }
+    planner_template = Path('prompts/test_planner_user_template.txt').read_text(encoding='utf-8')
+    generator_template = Path('prompts/test_generator_user_template.txt').read_text(encoding='utf-8')
+
+    planner_prompt, _ = build_test_planner_user_prompt(
+        planner_template,
+        request,
+        runtime_config=config,
+        generated_code_artifact=artifact,
+        available_user_chars=25000,
+    )
+    generator_prompt, _ = build_test_generator_user_prompt(
+        generator_template,
+        request,
+        generated_test_file='tests/test_generated.py',
+        example_test_source='',
+        runtime_config=config,
+        available_user_chars=25000,
+        generated_code_artifact=artifact,
+        test_plan={'target_symbol': 'support_app.storage.NoteStorage.search_results'},
+    )
+
+    for prompt in (planner_prompt, generator_prompt):
+        assert 'Visible parent constructor contract for tests' in prompt
+        assert 'NoteStorage(base_dir: Path)' in prompt
+        assert 'Path/PurePath' in prompt
+        assert 'а не строку' in prompt
+        assert 'target_obj = NoteStorage(base_dir=tmp_path)' in prompt
+        assert 'tmp_path` как параметр pytest-тестовой функции' in prompt
+
+
+def test_test_generator_keeps_constructor_guidance_when_full_file_is_trimmed() -> None:
+    config = load_config('config.yaml')
+    request = _request()
+    request.target.update({
+        'qualname': 'support_app.storage.NoteStorage',
+        'file_path': 'support_app/storage.py',
+        'operation': 'insert_after_symbol',
+        'insert_scope': 'class_body',
+        'expected_new_symbol_kind': 'method',
+        'parent_qualname': 'support_app.storage.NoteStorage',
+    })
+    long_header = '"""' + ('large module header\n' * 1200) + '"""\n'
+    request.project_context['full_file_source'] = (
+        long_header
+        + 'from pathlib import Path\n\n'
+        + 'class NoteStorage:\n'
+        + '    def __init__(self, base_dir: Path) -> None:\n'
+        + '        self.base_dir = base_dir\n'
+    )
+    artifact = {
+        'operation': 'insert_after_symbol',
+        'insert_scope': 'class_body',
+        'expected_new_symbol_kind': 'method',
+        'parent_qualname': 'support_app.storage.NoteStorage',
+        'code': 'def search_results(self, query):\n    return []\n',
+    }
+    generator_template = Path('prompts/test_generator_user_template.txt').read_text(encoding='utf-8')
+
+    prompt, _ = build_test_generator_user_prompt(
+        generator_template,
+        request,
+        generated_test_file='tests/test_generated.py',
+        example_test_source='',
+        runtime_config=config,
+        available_user_chars=12000,
+        generated_code_artifact=artifact,
+        test_plan={'target_symbol': 'support_app.storage.NoteStorage.search_results'},
+    )
+
+    assert 'Visible parent constructor contract for tests' in prompt
+    assert 'NoteStorage(base_dir: Path)' in prompt
+    assert 'target_obj = NoteStorage(base_dir=tmp_path)' in prompt

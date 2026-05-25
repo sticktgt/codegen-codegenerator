@@ -71,7 +71,7 @@ codegenerator:
 
   prompt_budget:
     generate_chars_limit: 18000
-    generate_test_chars_limit: 17000
+    generate_test_chars_limit: 20000
     repair_chars_limit: 18000
     min_user_prompt_chars: 500
     user_prompt_reserve_chars: 300

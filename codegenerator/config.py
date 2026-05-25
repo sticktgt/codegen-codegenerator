@@ -306,7 +306,7 @@ def load_config(config_path: str | Path | None = None) -> RuntimeConfig:
         ),
         prompt_budget=PromptBudgetSettings(
             generate_chars_limit=int(prompt_budget_cfg.get('generate_chars_limit', 5600)),
-            generate_test_chars_limit=int(prompt_budget_cfg.get('generate_test_chars_limit', 5400)),
+            generate_test_chars_limit=int(prompt_budget_cfg.get('generate_test_chars_limit', 7000)),
             repair_chars_limit=int(prompt_budget_cfg.get('repair_chars_limit', 5600)),
             min_user_prompt_chars=int(prompt_budget_cfg.get('min_user_prompt_chars', 400)),
             user_prompt_reserve_chars=int(prompt_budget_cfg.get('user_prompt_reserve_chars', 100)),

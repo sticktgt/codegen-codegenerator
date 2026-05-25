@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import re
 from typing import Any
@@ -421,6 +422,10 @@ def _render_visible_implementation_facts(
     fields_by_type = _visible_return_fields_from_contracts(project_context)
 
     facts: list[str] = []
+    if model_surfaces_text and model_surfaces_text != "none":
+        facts.append("Visible model surfaces (valid fields and constructor arguments):")
+        facts.append(model_surfaces_text)
+
     if allowed_text and allowed_text != "none":
         facts.append("Allowed calls:")
         facts.append(allowed_text)
@@ -440,10 +445,6 @@ def _render_visible_implementation_facts(
     if reuse_existing_logic_text and reuse_existing_logic_text != "none":
         facts.append("Подсказки по переиспользованию существующих методов проекта:")
         facts.append(reuse_existing_logic_text)
-
-    if model_surfaces_text and model_surfaces_text != "none":
-        facts.append("Visible model surfaces (valid fields and constructor arguments):")
-        facts.append(model_surfaces_text)
 
     if fields_by_type:
         facts.append("Visible return fields:")
@@ -472,6 +473,12 @@ def _required_project_imports_from_symbols(
     project_context: dict[str, Any],
     symbols: list[str],
 ) -> list[str]:
+    """Render imports for concrete visible symbols without test-specific rewrites.
+
+    This helper is used by production generation/repair prompt assembly. It should
+    not reinterpret class methods as parent-class imports or infer broader test
+    setup needs; those rules belong to the generated-test prompt path only.
+    """
     symbol_names = {
         str(symbol or "").strip().rsplit(".", 1)[-1]
         for symbol in symbols
@@ -481,17 +488,271 @@ def _required_project_imports_from_symbols(
         return []
 
     imports: dict[str, set[str]] = {}
-    for item in _contract_symbols_from_project_context(project_context):
+
+    def add_import_for_item(item: dict[str, Any]) -> None:
         name = str(item.get("name") or item.get("qualname", "").rsplit(".", 1)[-1]).strip()
+        qualname = str(item.get("qualname") or "").strip()
         module_name = str(item.get("module_name") or "").strip()
+        if not module_name and "." in qualname:
+            module_name = qualname.rsplit(".", 1)[0]
         if name in symbol_names and module_name:
             imports.setdefault(module_name, set()).add(name)
+
+    for item in _contract_symbols_from_project_context(project_context):
+        if isinstance(item, dict):
+            add_import_for_item(item)
+
+    for item in project_context.get("model_surfaces") or []:
+        if isinstance(item, dict):
+            add_import_for_item(item)
 
     return [
         f"from {module_name} import {', '.join(sorted(imports[module_name]))}"
         for module_name in sorted(imports)
     ]
 
+
+def _required_project_imports_from_symbols_for_tests(
+    project_context: dict[str, Any],
+    symbols: list[str],
+) -> list[str]:
+    """Render imports for generated tests.
+
+    Tests may need to import a parent class when the test plan references one of
+    its methods, but they must still avoid importing class methods as top-level
+    functions. Keeping this logic separate prevents test-only import inference
+    from changing production generation or repair prompts.
+    """
+    symbol_values = [str(symbol or "").strip() for symbol in symbols if str(symbol or "").strip()]
+    symbol_names = {symbol.rsplit(".", 1)[-1] for symbol in symbol_values}
+
+    for symbol in symbol_values:
+        parts = symbol.split(".")
+        if len(parts) >= 2 and parts[-2][:1].isupper():
+            symbol_names.add(parts[-2])
+
+    if not symbol_names:
+        return []
+
+    imports: dict[str, set[str]] = {}
+
+    def add_symbol_import(module_name: str, name: str) -> None:
+        module_name = str(module_name or "").strip()
+        name = str(name or "").strip()
+        if module_name and name:
+            imports.setdefault(module_name, set()).add(name)
+
+    def add_import_for_item(item: dict[str, Any]) -> None:
+        name = str(item.get("name") or item.get("qualname", "").rsplit(".", 1)[-1]).strip()
+        qualname = str(item.get("qualname") or "").strip()
+        kind = str(item.get("kind") or "").strip().lower()
+        module_name = str(item.get("module_name") or "").strip()
+        parent_qualname = str(item.get("parent_qualname") or item.get("parent") or "").strip()
+
+        if kind == "method":
+            if name not in symbol_names and qualname not in symbol_values:
+                return
+            parent = parent_qualname
+            if not parent and qualname.count(".") >= 2:
+                parent = qualname.rsplit(".", 1)[0]
+            if parent and parent.rsplit(".", 1)[-1][:1].isupper():
+                parent_module = parent.rsplit(".", 1)[0]
+                parent_name = parent.rsplit(".", 1)[-1]
+                add_symbol_import(parent_module, parent_name)
+            return
+
+        if not module_name and "." in qualname:
+            module_name = qualname.rsplit(".", 1)[0]
+        if name in symbol_names and module_name:
+            add_symbol_import(module_name, name)
+
+    for item in _contract_symbols_from_project_context(project_context):
+        if isinstance(item, dict):
+            add_import_for_item(item)
+
+    for item in project_context.get("model_surfaces") or []:
+        if isinstance(item, dict):
+            add_import_for_item(item)
+
+    return [
+        f"from {module_name} import {', '.join(sorted(imports[module_name]))}"
+        for module_name in sorted(imports)
+    ]
+
+
+def _required_project_imports_for_codegen(
+    project_context: dict[str, Any],
+    change_request: dict[str, Any] | None,
+) -> str:
+    request_parts = [
+        str((change_request or {}).get("title") or ""),
+        str((change_request or {}).get("description") or ""),
+        *[str(item or "") for item in ((change_request or {}).get("constraints") or [])],
+        *[str(item or "") for item in ((change_request or {}).get("notes") or [])],
+    ]
+    request_text = "\n".join(request_parts).lower()
+
+    symbols: list[str] = []
+    for item in project_context.get("required_contracts") or []:
+        qualname = str(item.get("qualname") or "").strip()
+        if qualname:
+            symbols.append(qualname)
+
+
+    for item in project_context.get("model_surfaces") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("qualname", "").rsplit(".", 1)[-1]).strip()
+        qualname = str(item.get("qualname") or "").strip()
+        if name and qualname and name.lower() in request_text:
+            symbols.append(qualname)
+
+    imports = _required_project_imports_from_symbols(project_context, symbols)
+    return "\n".join(imports)
+
+
+
+
+def _required_project_imports_for_tests(
+    project_context: dict[str, Any],
+    change_request: dict[str, Any] | None,
+) -> str:
+    """Render project imports for generated-test prompts only.
+
+    This keeps test setup hints from affecting production generate/repair prompts.
+    It may include required reuse contracts from contract_context because tests often
+    need to import helper functions referenced by the generated target code.
+    """
+    request_parts = [
+        str((change_request or {}).get("title") or ""),
+        str((change_request or {}).get("description") or ""),
+        *[str(item or "") for item in ((change_request or {}).get("constraints") or [])],
+        *[str(item or "") for item in ((change_request or {}).get("notes") or [])],
+    ]
+    request_text = "\n".join(request_parts).lower()
+
+    symbols: list[str] = []
+    for item in project_context.get("required_contracts") or []:
+        qualname = str(item.get("qualname") or "").strip()
+        if qualname:
+            symbols.append(qualname)
+
+    for item in (project_context.get("contract_context") or {}).get("related_symbols") or []:
+        if not isinstance(item, dict):
+            continue
+        qualname = str(item.get("qualname") or "").strip()
+        name = qualname.rsplit(".", 1)[-1]
+        role = str(item.get("role") or "").lower()
+        if qualname and ("required" in role or (name and name.lower() in request_text)):
+            symbols.append(qualname)
+
+    for item in project_context.get("model_surfaces") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("qualname", "").rsplit(".", 1)[-1]).strip()
+        qualname = str(item.get("qualname") or "").strip()
+        if name and qualname and name.lower() in request_text:
+            symbols.append(qualname)
+
+    imports = _required_project_imports_from_symbols_for_tests(project_context, symbols)
+    return "\n".join(imports)
+
+
+def _required_repair_import_changes_text(
+    required_imports_text: str,
+    error_context: dict[str, Any],
+) -> str:
+    unknown_names: set[str] = set()
+    summary = error_context.get("verification_summary") or {}
+    for block in summary.get("failed_blocks") or []:
+        for issue in block.get("issues") or []:
+            code = str(issue.get("code") or "")
+            if code not in {"unknown_runtime_name", "unknown_annotation_name"}:
+                continue
+            for name in issue.get("unknown_names") or []:
+                if str(name or "").strip():
+                    unknown_names.add(str(name).strip())
+            message = str(issue.get("message") or "")
+            for token in re.findall(r"`([A-Za-z_]\w*)`", message):
+                unknown_names.add(token)
+
+    if not unknown_names:
+        return ""
+
+    entries: list[dict[str, Any]] = []
+    for raw_line in required_imports_text.splitlines():
+        line = raw_line.strip()
+        match = re.match(r"from\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s+import\s+(.+)$", line)
+        if not match:
+            continue
+        module = match.group(1)
+        names = [name.strip() for name in match.group(2).split(",") if name.strip()]
+        selected = [name for name in names if name in unknown_names]
+        if selected:
+            entries.append({"action": "add_from_import", "module": module, "names": selected})
+
+    return _pretty(entries) if entries else ""
+
+
+
+def _available_names_from_import_context(import_context_text: str) -> set[str]:
+    names: set[str] = set()
+    for raw_line in str(import_context_text or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        from_match = re.match(r"from\s+[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s+import\s+(.+)$", line)
+        if from_match:
+            for part in from_match.group(1).split(","):
+                name_part = part.strip()
+                if not name_part:
+                    continue
+                name = name_part.split(" as ", 1)[-1].strip() if " as " in name_part else name_part.split(" as ", 1)[0].strip()
+                if name and name != "*":
+                    names.add(name)
+            continue
+        import_match = re.match(r"import\s+(.+)$", line)
+        if import_match:
+            for part in import_match.group(1).split(","):
+                module_part = part.strip()
+                if not module_part:
+                    continue
+                if " as " in module_part:
+                    names.add(module_part.split(" as ", 1)[-1].strip())
+                else:
+                    names.add(module_part.split(".", 1)[0].strip())
+    return {name for name in names if name}
+
+
+def _required_import_changes_from_import_lines(
+    required_imports_text: str,
+    *,
+    existing_import_context: str = "",
+    only_names: set[str] | None = None,
+) -> str:
+    existing_names = _available_names_from_import_context(existing_import_context)
+    entries: list[dict[str, Any]] = []
+
+    for raw_line in str(required_imports_text or "").splitlines():
+        line = raw_line.strip()
+        match = re.match(r"from\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s+import\s+(.+)$", line)
+        if not match:
+            continue
+        module = match.group(1)
+        names = [name.strip() for name in match.group(2).split(",") if name.strip()]
+        selected: list[str] = []
+        for name in names:
+            public_name = name.split(" as ", 1)[-1].strip() if " as " in name else name
+            raw_name = name.split(" as ", 1)[0].strip()
+            if not raw_name or public_name in existing_names:
+                continue
+            if only_names is not None and public_name not in only_names and raw_name not in only_names:
+                continue
+            selected.append(name)
+        if selected:
+            entries.append({"action": "add_from_import", "module": module, "names": selected})
+
+    return _pretty(entries) if entries else ""
 
 def _block_limit(runtime_config: RuntimeConfig | None, group: str, key: str, default: int) -> int:
     if runtime_config is None:
@@ -667,6 +928,13 @@ def _render_model_surfaces(
         })
     if not compact:
         return "none", {"model_surfaces_count": 0, "model_surfaces_chars": 0}
+
+    def surface_priority(item: dict[str, Any]) -> tuple[int, str]:
+        name_lower = str(item.get("name") or "").lower()
+        role_names = ("result", "response", "dto", "schema", "view", "output")
+        return (0 if any(role in name_lower for role in role_names) else 1, name_lower)
+
+    compact = sorted(compact, key=surface_priority)
     rendered = _pretty(compact)
     original_chars = len(rendered)
     if max_chars > 0 and len(rendered) > max_chars:
@@ -777,8 +1045,28 @@ def _compact_change_request_for_codegen(
         lines.append("Description:")
         lines.append(description_short)
     if constraints:
+        critical_constraints = [
+            item
+            for item in constraints
+            if any(
+                marker in item.lower()
+                for marker in (
+                    "не ",
+                    "только",
+                    "видим",
+                    "аргумент",
+                    "keyword",
+                    "constructor",
+                    "словар",
+                    "dict",
+                )
+            )
+        ]
+        if critical_constraints:
+            lines.append("Critical request constraints:")
+            lines.extend(f"- {item}" for item in critical_constraints[:8])
         lines.append("Request constraints:")
-        lines.extend(f"- {item}" for item in constraints[:8])
+        lines.extend(f"- {item}" for item in constraints[:16])
 
     if planner_result:
         filtered_planner = _filter_planner_result_for_insert_after(
@@ -929,7 +1217,11 @@ def build_test_planner_user_prompt(
             + "\n".join(f"- {item}" for item in default_constraints[:8])
         ).strip()
 
-    full_file_source = str(pc.get("full_file_source", "") or "").strip()
+    # Keep the raw full-file source for compact structural guidance. The
+    # rendered full-file block may be trimmed later, but constructor guidance
+    # must remain based on the complete source when it is available.
+    full_file_source_for_guidance = str(pc.get("full_file_source", "") or "").strip()
+    full_file_source = full_file_source_for_guidance
     planner_related_tests_max_items = (
         runtime_config.prompt_assembly.test_planner_related_tests_max_items
         if runtime_config
@@ -957,6 +1249,11 @@ def build_test_planner_user_prompt(
         max_items=runtime_config.test_prompt_contract_symbols if runtime_config else 3,
         per_item_chars=runtime_config.test_prompt_contract_symbol_chars if runtime_config else 500,
     )
+    model_surfaces_text, model_surfaces_metrics = _render_model_surfaces(
+        pc,
+        max_chars=_block_limit(runtime_config, "generate_block_chars", "model_surfaces", 1200),
+    )
+    contract_metrics.update(model_surfaces_metrics)
     contract_context_block = _render_optional_block(
         "Связанные production-контракты",
         _normalize_optional_value(contract_context_text),
@@ -969,6 +1266,7 @@ def build_test_planner_user_prompt(
         "Contract attribute requirements for generated test data",
         _normalize_optional_value(contract_attribute_text),
     )
+    required_imports_text = _required_project_imports_for_tests(pc, request.change_request)
 
     import_context_text = _extract_import_context(full_file_source)
     inferred_symbols = _infer_project_symbols(target_source)
@@ -1028,6 +1326,25 @@ def build_test_planner_user_prompt(
         "reference_context_block": reference_context_block,
         "contract_context_block": contract_context_block,
         "contract_attribute_requirements_block": contract_attribute_block,
+        "required_imports_block": _render_optional_block("Required project imports", required_imports_text),
+        "model_surfaces_block": _render_optional_block("Visible constructor and field contracts for test data", _normalize_optional_value(model_surfaces_text)),
+        "test_behavior_guidance_block": _render_optional_block(
+            "Target-derived test data strategy",
+            _render_test_behavior_guidance(
+                target_source,
+                target_file=str(request.target.get("file_path", "") or ""),
+            ),
+        ),
+        "constructor_guidance_block": _render_optional_block(
+            "Visible parent constructor contract for tests",
+            _render_test_constructor_guidance(
+                full_file_source=full_file_source_for_guidance,
+                effective_target_symbol=effective_target_symbol,
+                parent_qualname=str(request.target.get("parent_qualname") or ""),
+                insert_scope=str(request.target.get("insert_scope") or ""),
+                expected_new_symbol_kind=str(request.target.get("expected_new_symbol_kind") or ""),
+            ),
+        ),
         "anchor_symbol": anchor_symbol or "null",
     }
 
@@ -1039,6 +1356,8 @@ def build_test_planner_user_prompt(
     prompt = template_text.format(**values)
     if "{reference_context_block}" not in template_text and values.get("reference_context_block"):
         prompt += values["reference_context_block"]
+    if "{required_imports_block}" not in template_text and values.get("required_imports_block"):
+        prompt += values["required_imports_block"]
     if isinstance(available_user_chars, int) and available_user_chars > 0 and len(prompt) > available_user_chars and values.get("reference_context_block"):
         values["reference_context_block"] = ""
         prompt = template_text.format(**values)
@@ -1267,6 +1586,24 @@ def build_coder_user_prompt(
         max_chars=getattr(runtime_config.prompt_assembly, "allowed_api_surface_chars", 1600),
     )
     coder_visible_facts_text = _normalize_optional_value(coder_visible_facts_text)
+    required_imports_text = _required_project_imports_for_codegen(pc, request.change_request)
+    full_file_import_context_text = _extract_import_context(full_file_text or str(pc.get("full_file_source", "") or ""))
+    required_codegen_import_changes_text = _required_import_changes_from_import_lines(
+        required_imports_text,
+        existing_import_context=full_file_import_context_text,
+    )
+    if required_codegen_import_changes_text:
+        coder_visible_facts_text = (
+            "Required import_changes for visible project symbols if these names are used directly in code:\n"
+            f"{required_codegen_import_changes_text}\n\n"
+            f"{coder_visible_facts_text}"
+        )
+    if required_imports_text:
+        coder_visible_facts_text = (
+            "Required project imports for visible project symbols:\n"
+            f"{required_imports_text}\n\n"
+            f"{coder_visible_facts_text}"
+        )
     protected_contract_context = _render_optional_block(
         "Allowed API Surface and visible implementation facts (authoritative)",
         coder_visible_facts_text,
@@ -1316,6 +1653,10 @@ def build_coder_user_prompt(
         request_value: str,
     ) -> str:
         return template_text.format(
+            required_codegen_import_changes_block=_render_optional_block(
+                "Required import_changes for names used by generated code",
+                required_codegen_import_changes_text,
+            ),
             operation=request.target.get("operation", "replace_symbol"),
             insert_scope=request.target.get("insert_scope") or "module_body",
             expected_new_symbol_kind=request.target.get("expected_new_symbol_kind") or "",
@@ -1399,8 +1740,8 @@ def build_coder_user_prompt(
 
     # Если уже слишком длинно, сначала слегка ужимаем request/target/outline
     if soft_limit and len(prompt) > soft_limit:
-        current_request, _ = _truncate_text(current_request, 260)
-        _record("truncated request to 260 in base prompt")
+        current_request, _ = _truncate_text(current_request, 1400)
+        _record("truncated request to 1400 in base prompt")
         prompt = _render(
             current_module_outline,
             current_target,
@@ -1577,8 +1918,8 @@ def build_coder_user_prompt(
         )
 
     if effective_limit and len(prompt) > effective_limit and current_request:
-        current_request, _ = _truncate_text(current_request, 160)
-        _record("truncated request to 160 on hard overflow")
+        current_request, _ = _truncate_text(current_request, 1000)
+        _record("truncated request to 1000 on hard overflow")
         prompt = _render(
             current_module_outline,
             current_target,
@@ -1718,6 +2059,13 @@ def _build_repair_problem_block(
     failed_blocks = verification_summary.get("failed_blocks") or []
     problems: list[dict[str, Any]] = []
 
+    priority_by_code = {
+        "unknown_model_constructor_keyword": 0,
+        "model_constructor_field_type_mismatch": 1,
+        "unknown_runtime_name": 2,
+        "unknown_annotation_name": 3,
+    }
+
     for block in failed_blocks:
         block_name = str(block.get("name") or "")
         details = block.get("details") or {}
@@ -1773,6 +2121,12 @@ def _build_repair_problem_block(
                     "Do not leave unresolved names in repaired production code."
                 )
                 item["unknown_names"] = runtime_details.get("unknown_names") or []
+            elif code == "unknown_model_constructor_keyword":
+                item["repair_objective"] = (
+                    "Keep the requested result/model object and fix the constructor call. "
+                    "Replace invented or alias keyword arguments with only the visible constructor fields "
+                    "listed in the diagnostic message. Do not replace the requested model/result object with dict."
+                )
             elif code == "model_constructor_field_type_mismatch":
                 model_details = details.get("model_surface_usage_check") or {}
                 mismatches: list[dict[str, Any]] = []
@@ -1791,9 +2145,18 @@ def _build_repair_problem_block(
     if not problems:
         return ""
 
+    problems = sorted(
+        problems,
+        key=lambda item: (
+            priority_by_code.get(str(item.get("code") or ""), 10),
+            str(item.get("block") or ""),
+            str(item.get("message") or ""),
+        ),
+    )
+
     return _render_optional_block(
         "Критическая ошибка для repair",
-        _pretty({"issues": problems[:3]}),
+        _pretty({"issues": problems[:8]}),
     )
 
 def _render_optional_block(title: str, value: str) -> str:
@@ -1855,6 +2218,41 @@ def build_repair_user_prompt(
         max_items=runtime_config.repair_max_contract_symbols if runtime_config else 2,
         per_item_chars=runtime_config.repair_max_contract_symbol_chars if runtime_config else 500,
     )
+    repair_model_surfaces_text, repair_model_surfaces_metrics = _render_model_surfaces(
+        project_context,
+        max_chars=_block_limit(runtime_config, "repair_block_chars", "model_surfaces", 900),
+    )
+    repair_model_surfaces_text = _normalize_optional_value(repair_model_surfaces_text)
+    required_repair_imports_text = _required_project_imports_for_codegen(project_context, change_request)
+    full_file_import_context_text = _extract_import_context(str(project_context.get("full_file_source", "") or ""))
+    required_repair_import_changes = _required_repair_import_changes_text(
+        required_repair_imports_text,
+        request.error_context or {},
+    )
+    # Fall back to all required imports that are not already available in the target module.
+    # This still only renders prompt data; it does not modify the artifact after the LLM response.
+    if not required_repair_import_changes:
+        required_repair_import_changes = _required_import_changes_from_import_lines(
+            required_repair_imports_text,
+            existing_import_context=full_file_import_context_text,
+        )
+    required_repair_import_changes_block = _render_optional_block(
+        "Required repair import_changes",
+        required_repair_import_changes,
+    )
+    if required_repair_imports_text:
+        contract_context_text = (
+            "Required project imports for visible project symbols:\n"
+            f"{required_repair_imports_text}\n\n---\n\n"
+            f"{contract_context_text}"
+        )
+    if repair_model_surfaces_text and repair_model_surfaces_text != "none":
+        contract_context_text = (
+            "Visible model surfaces (valid fields and constructor arguments):\n"
+            f"{repair_model_surfaces_text}\n\n---\n\n"
+            f"{contract_context_text}"
+        )
+        contract_metrics.update(repair_model_surfaces_metrics)
     contract_context_block = _render_optional_block(
         "Связанные production-контракты",
         _normalize_optional_value(contract_context_text),
@@ -1906,6 +2304,7 @@ def build_repair_user_prompt(
         "insert_after": previous_artifact.get("insert_after") or "null",
         "request": _compact_change_request_for_codegen(change_request, None) or "repair request",
         "repair_problem_block": repair_problem_block,
+        "required_repair_import_changes_block": required_repair_import_changes_block,
         "syntax_error_block": syntax_error_block,
         "previous_code_block": _render_optional_block(
             "Код, который нужно исправить",
@@ -1941,19 +2340,9 @@ def build_repair_user_prompt(
         trim_steps.append("removed reference_context_block")
         prompt = _rerender()
 
-    if hard_limit and len(prompt) > hard_limit and values["contract_context_block"]:
-        values["contract_context_block"] = ""
-        trim_steps.append("removed contract_context_block")
-        prompt = _rerender()
-
-    if hard_limit and len(prompt) > hard_limit and values.get("required_contracts_block"):
-        values["required_contracts_block"] = ""
-        trim_steps.append("removed required_contracts_block")
-        prompt = _rerender()
-
-    if hard_limit and len(prompt) > hard_limit and values.get("required_class_members_block"):
-        values["required_class_members_block"] = ""
-        trim_steps.append("removed required_class_members_block")
+    if hard_limit and len(prompt) > hard_limit and values["full_file_source_block"]:
+        values["full_file_source_block"] = ""
+        trim_steps.append("removed full_file_source_block")
         prompt = _rerender()
 
     if hard_limit and len(prompt) > hard_limit and values["module_outline_block"]:
@@ -1961,9 +2350,20 @@ def build_repair_user_prompt(
         trim_steps.append("removed module_outline_block")
         prompt = _rerender()
 
-    if hard_limit and len(prompt) > hard_limit and values["full_file_source_block"]:
-        values["full_file_source_block"] = ""
-        trim_steps.append("removed full_file_source_block")
+    if hard_limit and len(prompt) > hard_limit and values.get("required_class_members_block"):
+        values["required_class_members_block"] = ""
+        trim_steps.append("removed required_class_members_block")
+        prompt = _rerender()
+
+    if hard_limit and len(prompt) > hard_limit and values.get("required_contracts_block"):
+        values["required_contracts_block"] = ""
+        trim_steps.append("removed required_contracts_block")
+        prompt = _rerender()
+
+    if hard_limit and len(prompt) > hard_limit and values["contract_context_block"]:
+        compact_contract, _ = _truncate_text(values["contract_context_block"], 1800)
+        values["contract_context_block"] = compact_contract
+        trim_steps.append("truncated contract_context_block to 1800")
         prompt = _rerender()
 
     if hard_limit and len(prompt) > hard_limit and previous_code:
@@ -2114,6 +2514,270 @@ def _build_test_reference_context_block(
 
 
 
+
+
+def _annotation_to_text(annotation: ast.AST | None) -> str:
+    if annotation is None:
+        return ""
+    try:
+        return ast.unparse(annotation)
+    except Exception:
+        if isinstance(annotation, ast.Name):
+            return annotation.id
+        if isinstance(annotation, ast.Attribute):
+            parts = []
+            node: ast.AST | None = annotation
+            while isinstance(node, ast.Attribute):
+                parts.append(node.attr)
+                node = node.value
+            if isinstance(node, ast.Name):
+                parts.append(node.id)
+            return ".".join(reversed(parts))
+    return ""
+
+
+def _parent_class_name_for_test_target(
+    *,
+    effective_target_symbol: str,
+    parent_qualname: str,
+    insert_scope: str,
+    expected_new_symbol_kind: str,
+) -> str:
+    if parent_qualname:
+        return parent_qualname.rsplit(".", 1)[-1]
+    symbol = str(effective_target_symbol or "").strip()
+    if insert_scope == "class_body" or expected_new_symbol_kind == "method":
+        parts = symbol.split(".")
+        if len(parts) >= 2:
+            return parts[-2]
+    return ""
+
+
+def _class_init_contract_from_source(source: str, class_name: str) -> dict[str, Any]:
+    if not source.strip() or not class_name:
+        return {}
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return {}
+
+    class_node = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef) and node.name == class_name
+        ),
+        None,
+    )
+    if class_node is None:
+        return {}
+
+    init_node = next(
+        (
+            child
+            for child in class_node.body
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == "__init__"
+        ),
+        None,
+    )
+    if init_node is None:
+        return {}
+
+    positional_args = [*init_node.args.posonlyargs, *init_node.args.args]
+    if positional_args and positional_args[0].arg == "self":
+        positional_args = positional_args[1:]
+    kwonly_args = list(init_node.args.kwonlyargs)
+    params = [*positional_args, *kwonly_args]
+
+    defaults_by_name: dict[str, ast.AST | None] = {}
+    positional_defaults = list(init_node.args.defaults or [])
+    if positional_defaults:
+        default_start = max(0, len(positional_args) - len(positional_defaults))
+        for arg, default in zip(positional_args[default_start:], positional_defaults):
+            defaults_by_name[arg.arg] = default
+    for arg, default in zip(kwonly_args, init_node.args.kw_defaults or []):
+        defaults_by_name[arg.arg] = default
+
+    rendered_params: list[str] = []
+    required: list[str] = []
+    annotations: dict[str, str] = {}
+    for arg in params:
+        annotation = _annotation_to_text(arg.annotation)
+        if annotation:
+            annotations[arg.arg] = annotation
+        part = arg.arg + (f": {annotation}" if annotation else "")
+        if arg.arg not in defaults_by_name:
+            required.append(arg.arg)
+        else:
+            default = defaults_by_name.get(arg.arg)
+            try:
+                default_text = ast.unparse(default) if default is not None else "None"
+            except Exception:
+                default_text = "..."
+            part += f" = {default_text}"
+        rendered_params.append(part)
+
+    return {
+        "class_name": class_name,
+        "signature": f"{class_name}({', '.join(rendered_params)})",
+        "required": required,
+        "annotations": annotations,
+    }
+
+
+def _render_test_constructor_guidance(
+    *,
+    full_file_source: str,
+    effective_target_symbol: str,
+    parent_qualname: str,
+    insert_scope: str,
+    expected_new_symbol_kind: str,
+) -> str:
+    class_name = _parent_class_name_for_test_target(
+        effective_target_symbol=effective_target_symbol,
+        parent_qualname=parent_qualname,
+        insert_scope=insert_scope,
+        expected_new_symbol_kind=expected_new_symbol_kind,
+    )
+    if not class_name:
+        return ""
+
+    contract = _class_init_contract_from_source(full_file_source, class_name)
+    if not contract:
+        return ""
+
+    lines = [
+        f"Видимый конструктор parent class для теста: {contract['signature']}.",
+    ]
+    required = list(contract.get("required") or [])
+    if required:
+        lines.append(
+            "Обязательные аргументы конструктора нужно передать явно: "
+            + ", ".join(required)
+            + ". Не вызывай class без этих аргументов."
+        )
+
+    annotations = contract.get("annotations") or {}
+    path_args = [
+        name
+        for name, annotation in annotations.items()
+        if annotation.rsplit(".", 1)[-1] in {"Path", "PurePath"}
+    ]
+    if path_args:
+        lines.append(
+            "Для аргументов с типом Path/PurePath передавай объект pathlib.Path или pytest tmp_path, "
+            "а не строку. Если используешь строковый literal, оберни его в Path(...), например Path('.')."
+        )
+        lines.append(
+            "Если используешь Path(...), добавь `from pathlib import Path`; встроенная pytest fixture `tmp_path` допустима для Path-аргумента."
+        )
+
+    recommended_args: list[str] = []
+    unsupported_required: list[str] = []
+    for name in required:
+        annotation = str(annotations.get(name, "") or "")
+        annotation_tail = annotation.rsplit(".", 1)[-1]
+        if annotation_tail in {"Path", "PurePath"}:
+            recommended_args.append(f"{name}=tmp_path")
+        elif annotation_tail in {"str", "String"}:
+            recommended_args.append(f'{name}="test"')
+        elif annotation_tail in {"int"}:
+            recommended_args.append(f"{name}=1")
+        elif annotation_tail in {"float"}:
+            recommended_args.append(f"{name}=1.0")
+        elif annotation_tail in {"bool"}:
+            recommended_args.append(f"{name}=True")
+        else:
+            unsupported_required.append(name)
+
+    if required and recommended_args and not unsupported_required:
+        setup_line = f"target_obj = {class_name}(" + ", ".join(recommended_args) + ")"
+        lines.append(
+            "Рекомендуемый минимальный setup для parent instance: "
+            f"`{setup_line}`. Скопируй этот шаблон вместо строковых заглушек или `__new__`."
+        )
+        if path_args:
+            lines.append(
+                "Если используешь recommended setup с `tmp_path`, добавь `tmp_path` как параметр pytest-тестовой функции."
+            )
+    elif required:
+        lines.append(
+            "Если не удается построить recommended setup для всех обязательных аргументов, "
+            "не подставляй строковые или None-заглушки; используй fake/stub или явно показанный project-context пример."
+        )
+
+    return "\n".join(f"- {line}" for line in lines)
+
+
+def _render_test_behavior_guidance(
+    target_source: str,
+    *,
+    target_file: str = "",
+) -> str:
+    source = str(target_source or "")
+    if not source.strip():
+        return ""
+
+    method_names = []
+    for name in re.findall(r"\bself\.([A-Za-z_][A-Za-z0-9_]*)\s*\(", source):
+        if name not in method_names:
+            method_names.append(name)
+
+    bare_calls = []
+    excluded = {
+        "if",
+        "for",
+        "while",
+        "return",
+        "len",
+        "str",
+        "int",
+        "float",
+        "bool",
+        "list",
+        "dict",
+        "set",
+        "tuple",
+        "print",
+        "range",
+        "isinstance",
+        "super",
+    }
+    for name in re.findall(r"(?<![\w.])([a-z_][A-Za-z0-9_]*)\s*\(", source):
+        if name in excluded:
+            continue
+        if name in bare_calls:
+            continue
+        bare_calls.append(name)
+
+    module_name = ""
+    file_path = str(target_file or "").strip()
+    if file_path.endswith(".py"):
+        module_name = file_path[:-3].replace("/", ".")
+
+    lines = []
+    if method_names:
+        helpers = ", ".join(method_names)
+        lines.append(
+            f"Target-код вызывает методы того же экземпляра через self: {helpers}. "
+            "Если тесту нужно контролировать такой helper, подмени именно видимый instance method "
+            "на объекте тестируемого класса. Данные, возвращаемые этой подменой, являются достаточной "
+            "подготовкой для вызова target-метода; не создавай скрытые атрибуты состояния вроде `_items`, "
+            "`_notes`, `_storage`, `_records`, если они не видны в class source."
+        )
+    if bare_calls:
+        helpers = ", ".join(bare_calls)
+        lines.append(
+            f"Target-код вызывает свободные helper-функции по локальным именам: {helpers}. "
+            "Предпочитай использовать реальные helper-функции и вычислять expected values через те же видимые helpers. "
+            "Если подмена действительно нужна, patch должен менять binding в модуле target-кода"
+            + (f" `{module_name}.<helper>`" if module_name else "")
+            + ", а не исходный модуль helper-а, потому что target-код может использовать direct from-import."
+        )
+    if not lines:
+        return ""
+    return "\n".join(f"- {line}" for line in lines)
+
 def _select_test_plan_fields_for_prompt(test_plan: dict[str, Any], fields: list[str]) -> dict[str, Any]:
     if not isinstance(test_plan, dict) or not test_plan:
         return {}
@@ -2144,8 +2808,11 @@ def _build_test_prompt_values(
     reference_context_block: str = "",
     contract_context_block: str = "",
     contract_attribute_requirements_block: str = "",
+    model_surfaces_text: str = "",
     required_imports_text: str = "",
     source_priority_text: str = "",
+    test_behavior_guidance_text: str = "",
+    constructor_guidance_text: str = "",
 ) -> dict[str, str]:
     target_block = _render_optional_block("Сгенерированный target-код", target_source)
     example_block = _render_optional_block("Пример теста", example_text)
@@ -2166,6 +2833,18 @@ def _build_test_prompt_values(
     required_imports_block = _render_optional_block(
         "Required project imports",
         required_imports_text,
+    )
+    model_surfaces_block = _render_optional_block(
+        "Visible constructor and field contracts for test data",
+        model_surfaces_text,
+    )
+    test_behavior_guidance_block = _render_optional_block(
+        "Target-derived test data strategy",
+        test_behavior_guidance_text,
+    )
+    constructor_guidance_block = _render_optional_block(
+        "Visible parent constructor contract for tests",
+        constructor_guidance_text,
     )
     return {
         "operation": request.target.get("operation", "replace_symbol"),
@@ -2194,6 +2873,9 @@ def _build_test_prompt_values(
         "inferred_symbols_block": inferred_symbols_block,
         "test_plan_block": test_plan_block,
         "required_imports_block": required_imports_block,
+        "model_surfaces_block": model_surfaces_block,
+        "test_behavior_guidance_block": test_behavior_guidance_block,
+        "constructor_guidance_block": constructor_guidance_block,
         "reference_context_block": reference_context_block,
         "contract_context_block": contract_context_block,
         "contract_attribute_requirements_block": contract_attribute_requirements_block,
@@ -2261,11 +2943,26 @@ def build_test_generator_user_prompt(
         list(runtime_config.prompt_assembly.test_generator_plan_fields or []),
     )
     test_plan_text = _pretty(prompt_test_plan) if prompt_test_plan else ""    
-    required_imports = _required_project_imports_from_symbols(
+    required_imports = _required_project_imports_from_symbols_for_tests(
         request.project_context or {},
         list((effective_test_plan or {}).get("must_use_symbols") or []),
     )
-    required_imports_text = "\n".join(required_imports)
+    request_required_imports_text = _required_project_imports_for_tests(
+        request.project_context or {},
+        request.change_request,
+    )
+    required_imports_text = "\n".join(
+        dict.fromkeys(
+            [
+                *[line for line in required_imports if str(line or "").strip()],
+                *[
+                    line
+                    for line in request_required_imports_text.splitlines()
+                    if str(line or "").strip()
+                ],
+            ]
+        )
+    )
     target_symbol = pc.get("target_symbol") or {}
     compact_request_text = _compact_change_request_for_codegen(
         request.change_request,
@@ -2306,7 +3003,13 @@ def build_test_generator_user_prompt(
         else ""
     )
 
-    full_file_source_text = str(pc.get("full_file_source", "") or "").strip()
+    # Keep an untrimmed copy for small, high-value structural facts such as
+    # parent constructor signatures. The rendered full-file block may be
+    # truncated heavily for prompt budget, but constructor guidance should not
+    # disappear just because the visible file excerpt no longer reaches the
+    # class body.
+    full_file_source_for_guidance = str(pc.get("full_file_source", "") or "").strip()
+    full_file_source_text = full_file_source_for_guidance
     source_priority_text = ""
     if target_source_origin == "generated_code_artifact":
         source_priority_text = (
@@ -2336,6 +3039,11 @@ def build_test_generator_user_prompt(
         max_items=runtime_config.test_prompt_contract_symbols,
         per_item_chars=runtime_config.test_prompt_contract_symbol_chars,
     )
+    model_surfaces_text, model_surfaces_metrics = _render_model_surfaces(
+        pc,
+        max_chars=_block_limit(runtime_config, "generate_block_chars", "model_surfaces", 1200),
+    )
+    contract_metrics.update(model_surfaces_metrics)
     contract_context_block = _render_optional_block(
         "Связанные production-контракты",
         _normalize_optional_value(contract_context_text),
@@ -2440,8 +3148,20 @@ def build_test_generator_user_prompt(
             reference_context_block=reference_context_block,
             contract_context_block=contract_context_block,
             contract_attribute_requirements_block=contract_attribute_requirements_block,
+            model_surfaces_text=_normalize_optional_value(model_surfaces_text),
             required_imports_text=required_imports_text,
             source_priority_text=source_priority_text,
+            test_behavior_guidance_text=_render_test_behavior_guidance(
+                target_source,
+                target_file=str(request.target.get("file_path", "") or ""),
+            ),
+            constructor_guidance_text=_render_test_constructor_guidance(
+                full_file_source=full_file_source_for_guidance,
+                effective_target_symbol=effective_target_symbol,
+                parent_qualname=str(request.target.get("parent_qualname") or ""),
+                insert_scope=insert_scope,
+                expected_new_symbol_kind=expected_new_symbol_kind,
+            ),
         )
         prompt_value = template_text.format(**values)
         if "{reference_context_block}" not in template_text and values.get("reference_context_block"):
@@ -2713,6 +3433,8 @@ def build_repair_planner_user_prompt(
         except Exception:
             allowed_api_surface_text = ""
 
+    required_repair_imports_text = _required_project_imports_for_codegen(project_context, change_request)
+
     if allowed_api_surface_text and contract_context_text:
         contract_context_text = (
             "Allowed API Surface (authoritative; do not invent dependency calls outside this list):\n"
@@ -2722,6 +3444,13 @@ def build_repair_planner_user_prompt(
         contract_context_text = (
             "Allowed API Surface (authoritative; do not invent dependency calls outside this list):\n"
             f"{allowed_api_surface_text}"
+        )
+
+    if required_repair_imports_text:
+        contract_context_text = (
+            "Required project imports for visible project symbols:\n"
+            f"{required_repair_imports_text}\n\n---\n\n"
+            f"{contract_context_text}"
         )
 
     repair_problem_block = _build_repair_problem_block(request.error_context or {})
