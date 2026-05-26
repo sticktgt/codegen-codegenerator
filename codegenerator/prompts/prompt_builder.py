@@ -1021,6 +1021,93 @@ def _build_coder_prompt_metrics(
     }
 
 
+
+_REQUEST_OUTPUT_MARKERS = (
+    "долж", "обязан", "обязател", "вернуть", "возвращ", "return",
+    "результат", "заканчив", "начин", "содерж", "формат", "расширен",
+    "имя", "строк", "literal", "литерал", "точно",
+)
+
+_LITERAL_TOKEN_RE = re.compile(
+    r"`([^`]+)`|\"([^\"]+)\"|'([^']+)'|(?<![\w/])\.[A-Za-z0-9][A-Za-z0-9_.-]{0,30}(?![\w/])|\b[A-Za-z_][A-Za-z0-9_]*_[A-Za-z0-9_]*\b|\b[A-Z][A-Za-z0-9_]{2,}\b|\b[YMDAHhmsS_-]{4,}\b"
+)
+
+
+def _split_request_sentences(text: str) -> list[str]:
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not cleaned:
+        return []
+    parts = re.split(r"(?<=[.!?。])\s+|\n+|(?<=;)\s+", cleaned)
+    return [part.strip(" -\t") for part in parts if part.strip(" -\t")]
+
+
+def _extract_literal_tokens_from_text(text: str) -> list[str]:
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for match in _LITERAL_TOKEN_RE.finditer(str(text or "")):
+        value = next((group for group in match.groups() if group), None) or match.group(0)
+        value = str(value).strip()
+        if not value or len(value) > 80:
+            continue
+        # Avoid treating common English/Russian words as literals. Keep snake_case,
+        # dotted extensions, quoted/backtick text, CamelCase/API-like names and compact format tokens.
+        if re.fullmatch(r"[A-Za-z]+", value) and "_" not in value and not re.search(r"[A-Z].*[A-Z]", value):
+            continue
+        if value not in seen:
+            seen.add(value)
+            tokens.append(value)
+    return tokens[:16]
+
+
+def _render_request_output_obligations(change_request: dict[str, Any]) -> str:
+    """Render compact, request-derived output/literal obligations.
+
+    This is intentionally generic: it does not know about specific examples like
+    file extensions. It only extracts statements and literals that are explicitly
+    present in the user's CR, so old docstrings and related context cannot silently
+    override them in code or generated tests.
+    """
+    title = str(change_request.get("title", "") or "")
+    description = str(change_request.get("description", "") or "")
+    constraints = [str(item) for item in (change_request.get("constraints") or []) if item]
+    source_parts = [title, description, *constraints]
+    source_text = "\n".join(part for part in source_parts if part).strip()
+    if not source_text:
+        return ""
+
+    obligation_statements: list[str] = []
+    seen_statements: set[str] = set()
+    for sentence in _split_request_sentences(description):
+        lower = sentence.lower()
+        if any(marker in lower for marker in _REQUEST_OUTPUT_MARKERS):
+            if sentence not in seen_statements:
+                seen_statements.add(sentence)
+                obligation_statements.append(sentence)
+    for constraint in constraints:
+        lower = constraint.lower()
+        if any(marker in lower for marker in _REQUEST_OUTPUT_MARKERS):
+            if constraint not in seen_statements:
+                seen_statements.add(constraint)
+                obligation_statements.append(constraint)
+
+    literals = _extract_literal_tokens_from_text(source_text)
+
+    if not obligation_statements and not literals:
+        return ""
+
+    lines = [
+        "Explicit request output and literal obligations:",
+        "These requirements are derived only from the user's CR and override old docstrings, target source, related tests and planner wording when they conflict.",
+    ]
+    if obligation_statements:
+        lines.append("User output/format requirements:")
+        lines.extend(f"- {item}" for item in obligation_statements[:8])
+    if literals:
+        lines.append("User-specified literals/names/formats to preserve in behavior and tests:")
+        lines.extend(f"- {item}" for item in literals[:12])
+    return "\n".join(lines)
+
+
 def _render_constraints_block(constraints: list[str], limit: int = 6) -> str:
     if not constraints:
         return "[]"
@@ -1067,6 +1154,10 @@ def _compact_change_request_for_codegen(
             lines.extend(f"- {item}" for item in critical_constraints[:8])
         lines.append("Request constraints:")
         lines.extend(f"- {item}" for item in constraints[:16])
+
+    request_obligations = _render_request_output_obligations(change_request)
+    if request_obligations:
+        lines.append(request_obligations)
 
     if planner_result:
         filtered_planner = _filter_planner_result_for_insert_after(

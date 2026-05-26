@@ -849,3 +849,183 @@ def test_test_generator_keeps_constructor_guidance_when_full_file_is_trimmed() -
     assert 'Visible parent constructor contract for tests' in prompt
     assert 'NoteStorage(base_dir: Path)' in prompt
     assert 'target_obj = NoteStorage(base_dir=tmp_path)' in prompt
+
+
+def test_replace_symbol_prompts_disallow_nested_helpers_and_stale_docstring_requirements() -> None:
+    coder_template = Path('prompts/coder_user_template.txt').read_text(encoding='utf-8')
+    repair_template = Path('prompts/repair_user_template.txt').read_text(encoding='utf-8')
+    planner_template = Path('prompts/planner_user_template.txt').read_text(encoding='utf-8')
+    repair_planner_template = Path('prompts/repair_planner_user_template.txt').read_text(encoding='utf-8')
+
+    assert 'Не объявляй внутри него вложенные def/class/helper-symbols' in coder_template
+    assert 'Вспомогательную логику реализуй прямо в теле target symbol' in coder_template
+    assert 'старый docstring' in coder_template
+    assert 'исходный запрос пользователя как источник истины' in coder_template
+
+    assert 'nested symbols' in repair_template
+    assert 'Нельзя просто переименовать вложенный helper' in repair_template
+    assert 'полностью убери вложенное объявление' in repair_template
+    assert 'не меняй requested insert_scope' in repair_template
+
+    assert 'Не добавляй в explicit_requirements требования из старого docstring' in planner_template
+    assert 'запрос пользователя имеет приоритет' in planner_template
+
+    assert 'nested symbols' in repair_planner_template
+    assert 'Не планируй переименование helper-функции' in repair_planner_template
+
+
+def test_code_and_repair_parsers_normalize_insert_scope_aliases() -> None:
+    from codegenerator.generation.coder import parse_code_response
+    from codegenerator.generation.repair import parse_repair_response
+
+    code_payload = (
+        '{'
+        '"target_file":"note/note_storage.py",'
+        '"operation":"replace_symbol",'
+        '"insert_scope":"class",'
+        '"code":"def generate_filename(self, note):\\n    return \\\"x.note\\\""'
+        '}'
+    )
+    repair_payload = (
+        '{'
+        '"target_file":"note/note_storage.py",'
+        '"operation":"replace_symbol",'
+        '"insert_scope":"module",'
+        '"code":"def helper():\\n    return None"'
+        '}'
+    )
+
+    assert parse_code_response(code_payload)['insert_scope'] == 'class_body'
+    assert parse_repair_response(repair_payload)['insert_scope'] == 'module_body'
+
+
+def test_prompts_render_explicit_request_output_obligations_without_example_specific_logic() -> None:
+    from codegenerator.config import load_config
+    from codegenerator.models.requests import GenerationRequest, RepairRequest
+    from codegenerator.prompts.prompt_builder import (
+        build_coder_user_prompt,
+        build_repair_user_prompt,
+        build_test_generator_user_prompt,
+        build_test_planner_user_prompt,
+    )
+
+    config = load_config('config.yaml')
+    change_request = {
+        'title': 'Генерация безопасного имени файла заметки',
+        'description': (
+            'Реализовать генерацию имени файла заметки на основе темы и даты создания. '
+            'Имя должно быть безопасным для файловой системы, содержать дату/время '
+            'и заканчиваться расширением .note.'
+        ),
+        'constraints': [],
+        'notes': [],
+    }
+    project_context = {
+        'module_outline': [],
+        'full_file_source': 'from pathlib import Path\nfrom note.note_model import Note\n',
+        'target_symbol': {
+            'qualname': 'note.note_storage.NoteStorage.generate_filename',
+            'name': 'generate_filename',
+            'kind': 'method',
+            'source': (
+                'def generate_filename(self, note: Note) -> str:\n'
+                '    """Returns filename without extension."""\n'
+                '    raise NotImplementedError\n'
+            ),
+        },
+        'contract_context': {'related_symbols': []},
+        'model_surfaces': [
+            {
+                'name': 'Note',
+                'qualname': 'note.note_model.Note',
+                'constructor_fields': ['subject', 'content', 'created_at'],
+            }
+        ],
+    }
+    generation_request = GenerationRequest(
+        request_id='literal-obligations',
+        mode='generate',
+        change_request=change_request,
+        target={
+            'qualname': 'note.note_storage.NoteStorage.generate_filename',
+            'file_path': 'note/note_storage.py',
+            'operation': 'replace_symbol',
+            'insert_scope': 'class_body',
+            'expected_new_symbol_kind': 'method',
+            'parent_qualname': 'note.note_storage.NoteStorage',
+        },
+        project_context=project_context,
+        options={},
+    )
+
+    coder_prompt, _ = build_coder_user_prompt(
+        Path('prompts/coder_user_template.txt').read_text(encoding='utf-8'),
+        generation_request,
+        planner_result={'explicit_requirements': ['Вернуть имя без расширения']},
+        runtime_config=config,
+        available_user_chars=20000,
+    )
+    planner_prompt, _ = build_test_planner_user_prompt(
+        Path('prompts/test_planner_user_template.txt').read_text(encoding='utf-8'),
+        generation_request,
+        runtime_config=config,
+        generated_code_artifact={
+            'code': 'def generate_filename(self, note):\n    return "Meeting_20240315143022"\n'
+        },
+        available_user_chars=20000,
+    )
+    generator_prompt, _ = build_test_generator_user_prompt(
+        Path('prompts/test_generator_user_template.txt').read_text(encoding='utf-8'),
+        generation_request,
+        generated_test_file='tests/test_generated.py',
+        example_test_source='',
+        runtime_config=config,
+        available_user_chars=20000,
+        generated_code_artifact={
+            'code': 'def generate_filename(self, note):\n    return "Meeting_20240315143022"\n'
+        },
+        test_plan={'target_symbol': 'note.note_storage.NoteStorage.generate_filename'},
+    )
+    repair_request = RepairRequest(
+        request_id='literal-obligations-repair',
+        mode='repair',
+        previous_generation_request_id='literal-obligations',
+        change_request=change_request,
+        error_context={'verification_summary': {'failed_blocks': []}},
+        previous_artifact={
+            'operation': 'replace_symbol',
+            'target_file': 'note/note_storage.py',
+            'target_qualname': 'note.note_storage.NoteStorage.generate_filename',
+            'insert_after': 'note.note_storage.NoteStorage.generate_filename',
+            'code': 'def generate_filename(self, note):\n    return "Meeting_20240315143022"\n',
+        },
+        project_context=project_context,
+        target={'file_path': 'note/note_storage.py', 'qualname': 'note.note_storage.NoteStorage.generate_filename'},
+    )
+    repair_prompt = build_repair_user_prompt(
+        Path('prompts/repair_user_template.txt').read_text(encoding='utf-8'),
+        repair_request,
+        runtime_config=config,
+    )
+
+    for prompt in (coder_prompt, planner_prompt, generator_prompt, repair_prompt):
+        assert 'Explicit request output and literal obligations' in prompt
+        assert 'заканчиваться расширением .note' in prompt
+        assert '- .note' in prompt
+        assert 'стар' in prompt
+
+
+def test_request_literal_extractor_is_general_and_includes_function_names_without_hardcoded_extensions() -> None:
+    from codegenerator.prompts.prompt_builder import _render_request_output_obligations
+
+    block = _render_request_output_obligations(
+        {
+            'title': 'Добавить вывод результата',
+            'description': 'Метод render_summary должен возвращать строку в формате REPORT_YYYYMMDD.json.',
+            'constraints': ['Не менять render_summary.'],
+        }
+    )
+
+    assert 'Explicit request output and literal obligations' in block
+    assert 'REPORT_YYYYMMDD.json' in block
+    assert 'render_summary' in block

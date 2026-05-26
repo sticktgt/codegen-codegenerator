@@ -20,6 +20,22 @@ def _normalize_operation(operation: str) -> str:
     }
     return mapping.get(value, value)
 
+
+def _normalize_insert_scope(value) -> str | None:
+    raw = str(value or '').strip().lower()
+    if not raw:
+        return None
+    mapping = {
+        'class': 'class_body',
+        'class_body': 'class_body',
+        'method': 'class_body',
+        'module': 'module_body',
+        'module_body': 'module_body',
+        'top_level': 'module_body',
+        'top-level': 'module_body',
+    }
+    return mapping.get(raw, raw)
+
 def _strip_leading_imports_for_insert_after(code: str) -> str:
     lines = code.splitlines()
     result: list[str] = []
@@ -78,7 +94,7 @@ def parse_code_response(content: str) -> dict:
     if parsed['operation'] == 'insert_after_symbol':
         parsed['code'] = _strip_leading_imports_for_insert_after(str(parsed.get('code') or ''))
 
-    parsed['insert_scope'] = str(parsed.get('insert_scope') or '').strip() or None
+    parsed['insert_scope'] = _normalize_insert_scope(parsed.get('insert_scope'))
     parsed['expected_new_symbol_kind'] = str(parsed.get('expected_new_symbol_kind') or '').strip() or None
     parsed['parent_qualname'] = str(parsed.get('parent_qualname') or '').strip() or None
     parsed['import_changes'] = _normalize_import_changes(parsed.get('import_changes'))

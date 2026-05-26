@@ -4,6 +4,7 @@ from codegenerator.generation.coder import (
     _normalize_operation,
     CANONICAL_OPERATIONS,
     _normalize_import_changes,
+    _normalize_insert_scope,
     _strip_leading_imports_for_insert_after,
 )
 
@@ -20,7 +21,7 @@ def parse_repair_response(content: str) -> dict:
         raise ValueError("repair result field 'operation' must be one of replace_symbol, add_symbol, insert_after_symbol")
     if parsed['operation'] == 'insert_after_symbol':
         parsed['code'] = _strip_leading_imports_for_insert_after(str(parsed.get('code') or ''))
-    parsed['insert_scope'] = str(parsed.get('insert_scope') or '').strip() or None
+    parsed['insert_scope'] = _normalize_insert_scope(parsed.get('insert_scope'))
     parsed['expected_new_symbol_kind'] = str(parsed.get('expected_new_symbol_kind') or '').strip() or None
     parsed['parent_qualname'] = str(parsed.get('parent_qualname') or '').strip() or None
     parsed['import_changes'] = _normalize_import_changes(parsed.get('import_changes'))
