@@ -53,7 +53,71 @@ def _strip_leading_imports_for_insert_after(code: str) -> str:
 
         result.append(line)
 
-    return "\n".join(result).lstrip()
+    return _dedent_insert_after_code("\n".join(result))
+
+
+def _dedent_insert_after_code(code: str) -> str:
+    """Normalize code returned for insert_after_symbol.
+
+    The model sometimes returns a class-body method with outer class indentation,
+    or a decorated method as ``@decorator`` followed by an indented ``def``.
+    The artifact contract expects the new symbol body without the surrounding
+    class indent; the applier will add class indentation later.
+    """
+    raw_lines = str(code or "").splitlines()
+    while raw_lines and not raw_lines[0].strip():
+        raw_lines.pop(0)
+    while raw_lines and not raw_lines[-1].strip():
+        raw_lines.pop()
+    if not raw_lines:
+        return ""
+
+    nonblank = [line for line in raw_lines if line.strip()]
+    indents = [len(line) - len(line.lstrip(" ")) for line in nonblank]
+    common_indent = min(indents) if indents else 0
+    if common_indent > 0:
+        raw_lines = [line[common_indent:] if len(line) >= common_indent else line.lstrip() for line in raw_lines]
+
+    # A common failure for @property is:
+    #   @property
+    #       def note_id(...):
+    #           ...
+    # Align the first def/async def after leading decorators with those decorators.
+    first_nonblank_idx = next((idx for idx, line in enumerate(raw_lines) if line.strip()), 0)
+    if raw_lines[first_nonblank_idx].lstrip().startswith("@"):
+        def_idx = None
+        for idx in range(first_nonblank_idx + 1, len(raw_lines)):
+            stripped = raw_lines[idx].lstrip()
+            if stripped.startswith("def ") or stripped.startswith("async def "):
+                def_idx = idx
+                break
+            if stripped and not stripped.startswith("@"):  # not a decorator block anymore
+                break
+        if def_idx is not None:
+            def_indent = len(raw_lines[def_idx]) - len(raw_lines[def_idx].lstrip(" "))
+            decorator_indent = len(raw_lines[first_nonblank_idx]) - len(raw_lines[first_nonblank_idx].lstrip(" "))
+            if def_indent > decorator_indent:
+                shift = def_indent - decorator_indent
+                raw_lines = [
+                    (line[shift:] if idx >= def_idx and line.startswith(" " * shift) else line)
+                    for idx, line in enumerate(raw_lines)
+                ]
+
+    return "\n".join(raw_lines).lstrip()
+
+
+def _normalize_expected_new_symbol_kind(value) -> str | None:
+    raw = str(value or '').strip().lower()
+    if not raw:
+        return None
+    mapping = {
+        'property': 'method',
+        'prop': 'method',
+        'method': 'method',
+        'function': 'function',
+        'class': 'class',
+    }
+    return mapping.get(raw, raw)
 
 
 def _normalize_import_changes(value) -> list[dict]:
@@ -95,7 +159,7 @@ def parse_code_response(content: str) -> dict:
         parsed['code'] = _strip_leading_imports_for_insert_after(str(parsed.get('code') or ''))
 
     parsed['insert_scope'] = _normalize_insert_scope(parsed.get('insert_scope'))
-    parsed['expected_new_symbol_kind'] = str(parsed.get('expected_new_symbol_kind') or '').strip() or None
+    parsed['expected_new_symbol_kind'] = _normalize_expected_new_symbol_kind(parsed.get('expected_new_symbol_kind'))
     parsed['parent_qualname'] = str(parsed.get('parent_qualname') or '').strip() or None
     parsed['import_changes'] = _normalize_import_changes(parsed.get('import_changes'))
 

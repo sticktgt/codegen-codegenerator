@@ -83,7 +83,7 @@ def test_budget_strategy_trims_contract_context() -> None:
         'related_symbols': [
             {
                 'qualname': f'module.symbol_{index}',
-                'source_excerpt': 'x' * 1000,
+                'source_excerpt': 'x' * 3000,
             }
             for index in range(5)
         ],
@@ -1009,7 +1009,7 @@ def test_prompts_render_explicit_request_output_obligations_without_example_spec
     )
 
     for prompt in (coder_prompt, planner_prompt, generator_prompt, repair_prompt):
-        assert 'Explicit request output and literal obligations' in prompt
+        assert 'Явные требования запроса к результату и литералам' in prompt
         assert 'заканчиваться расширением .note' in prompt
         assert '- .note' in prompt
         assert 'стар' in prompt
@@ -1026,6 +1026,373 @@ def test_request_literal_extractor_is_general_and_includes_function_names_withou
         }
     )
 
-    assert 'Explicit request output and literal obligations' in block
+    assert 'Явные требования запроса к результату и литералам' in block
     assert 'REPORT_YYYYMMDD.json' in block
     assert 'render_summary' in block
+
+
+def test_code_parser_normalizes_decorated_class_body_method_indent_and_kind() -> None:
+    from codegenerator.generation.coder import parse_code_response
+
+    payload = (
+        '{'
+        '"target_file":"note/note_search.py",'
+        '"operation":"insert_after_symbol",'
+        '"insert_scope":"class_body",'
+        '"expected_new_symbol_kind":"property",'
+        '"code":"@property\\n    def note_id(self) -> str | None:\\n        return getattr(self.note, \\\"id\\\", None)"'
+        '}'
+    )
+
+    parsed = parse_code_response(payload)
+
+    assert parsed['expected_new_symbol_kind'] == 'method'
+    assert parsed['code'].startswith('@property\ndef note_id')
+    assert '\n    return getattr' in parsed['code']
+
+
+def test_repair_parser_normalizes_outer_indented_decorated_class_body_method() -> None:
+    from codegenerator.generation.repair import parse_repair_response
+
+    payload = (
+        '{'
+        '"target_file":"note/note_search.py",'
+        '"operation":"insert_after_symbol",'
+        '"insert_scope":"class_body",'
+        '"expected_new_symbol_kind":"property",'
+        '"code":"    @property\\n    def note_id(self) -> str | None:\\n        return getattr(self.note, \\\"id\\\", None)"'
+        '}'
+    )
+
+    parsed = parse_repair_response(payload)
+
+    assert parsed['expected_new_symbol_kind'] == 'method'
+    assert parsed['code'].startswith('@property\ndef note_id')
+    assert '\n    return getattr' in parsed['code']
+
+
+def test_generation_prompts_allow_decorated_class_body_methods_safely() -> None:
+    coder_template = Path('prompts/coder_user_template.txt').read_text(encoding='utf-8')
+    repair_template = Path('prompts/repair_user_template.txt').read_text(encoding='utf-8')
+
+    assert 'decorator-строк' in coder_template
+    assert '@property' in coder_template
+    assert 'одном базовом уровне отступа' in coder_template
+    assert 'expected_new_symbol_kind оставляй "method"' in coder_template
+
+    assert 'decorator-строк' in repair_template
+    assert 'unexpected indent в decorated method' in repair_template
+    assert 'expected_new_symbol_kind из параметров задачи' in repair_template
+
+
+
+def test_replace_symbol_preservation_guidance_is_generic_and_source_derived() -> None:
+    from codegenerator.prompts.prompt_builder import _render_replace_symbol_preservation_guidance
+
+    source = '''
+def update_item(self, item):
+    if not isinstance(item, Item):
+        raise TypeError("bad item")
+    path = self.path_for(item)
+    if item.identifier is None:
+        item.identifier = path.stem
+    data = {"name": item.name, "identifier": item.identifier}
+    self.writer.write(path, data)
+    return str(path)
+'''
+    block = _render_replace_symbol_preservation_guidance(
+        operation='replace_symbol',
+        change_request={
+            'title': 'Обновить значение при сохранении',
+            'description': 'При сохранении нужно обновить служебное значение.',
+            'constraints': ['Сохранить текущую структуру сохранения и формат данных.'],
+        },
+        target_source=source,
+    )
+
+    assert 'Сохраняемые элементы' not in block
+    assert 'Порядок сохраняемых действий' in block
+    assert 'if item.identifier is None' in block
+    assert 'item.identifier = path.stem' in block
+    assert 'path_for(item)' in block
+    assert 'item.identifier' in block
+    assert 'name' in block
+    assert 'return' not in block.lower() or 'str(path)' in block
+    assert 'NoteStorage' not in block
+    assert 'updated_at' not in block
+
+
+def test_replace_symbol_preservation_guidance_is_not_rendered_without_preserve_request() -> None:
+    from codegenerator.prompts.prompt_builder import _render_replace_symbol_preservation_guidance
+
+    block = _render_replace_symbol_preservation_guidance(
+        operation='replace_symbol',
+        change_request={
+            'title': 'Добавить проверку',
+            'description': 'Метод должен вернуть True для валидного значения.',
+            'constraints': [],
+        },
+        target_source='def check(self, value):\n    return bool(value)\n',
+    )
+
+    assert block == ''
+
+
+def test_context_budget_preserves_longer_target_for_replace_symbol_preserve_requests() -> None:
+    class Config:
+        class Budget:
+            generate_module_outline_keep = 4
+            generate_related_tests_keep = 0
+            generate_related_test_source_limit = 0
+            generate_target_source_limit = 100
+            generate_test_drop_reference = True
+            generate_test_module_outline_keep = 2
+            generate_test_related_tests_keep = 0
+            generate_test_related_test_source_limit = 0
+            generate_test_target_source_limit = 100
+            repair_drop_reference = True
+            repair_module_outline_keep = 2
+            repair_verification_message_limit = 100
+            repair_previous_artifact_code_limit = 100
+            repair_related_tests_keep = 0
+            repair_related_test_source_limit = 0
+            repair_target_source_limit = 100
+
+        budget_strategy = Budget()
+        coder_max_contract_symbols = 0
+        coder_max_contract_symbol_chars = 0
+        test_prompt_contract_symbols = 0
+        test_prompt_contract_symbol_chars = 0
+        repair_max_contract_symbols = 0
+        repair_max_contract_symbol_chars = 0
+
+    long_source = 'def save(self, value):\n' + '\n'.join(f'    step_{i} = value' for i in range(80)) + '\n    return value\n'
+    request = {
+        'change_request': {
+            'title': 'Обновить сохранение',
+            'description': 'Нужно изменить одно значение.',
+            'constraints': ['Сохранить текущую структуру и формат результата.'],
+        },
+        'target': {'operation': 'replace_symbol'},
+        'project_context': {
+            'target_symbol': {'source': long_source},
+            'related_tests': [],
+            'contract_context': {'related_symbols': []},
+            'module_outline': [],
+        },
+        'reference_context': {'reference_artifacts': []},
+        'options': {},
+    }
+
+    
+    class Logger:
+        def info(self, *args, **kwargs):
+            pass
+
+    trimmed, trim_log = apply_budget_strategy(request, 'generate', 1000, logger=Logger(), config=Config())
+
+    kept_source = trimmed['project_context']['target_symbol']['source']
+    assert len(kept_source) > 100
+    assert 'step_79 = value' in kept_source
+
+
+def test_replace_symbol_preservation_block_is_rendered_in_coder_prompt() -> None:
+    from codegenerator.config import load_config
+    from codegenerator.models.requests import GenerationRequest
+    from codegenerator.prompts.prompt_builder import build_coder_user_prompt
+
+    template = Path('prompts/coder_user_template.txt').read_text(encoding='utf-8')
+    config = load_config('config.yaml')
+    source = '''def update_item(self, item):
+    if item.identifier is None:
+        item.identifier = self.identifier_for(item)
+    data = {"name": item.name, "identifier": item.identifier}
+    self.writer.write(item, data)
+    return str(item.identifier)
+'''
+    request = GenerationRequest(
+        request_id='preserve-coder',
+        mode='generate',
+        change_request={
+            'title': 'Обновить значение при сохранении',
+            'description': 'При сохранении нужно обновить одно служебное значение.',
+            'constraints': ['Сохранить текущую структуру и формат данных.'],
+        },
+        target={
+            'qualname': 'app.storage.Storage.update_item',
+            'file_path': 'app/storage.py',
+            'operation': 'replace_symbol',
+            'insert_scope': 'class_body',
+        },
+        project_context={
+            'module_outline': [],
+            'full_file_source': '',
+            'target_symbol': {
+                'qualname': 'app.storage.Storage.update_item',
+                'name': 'update_item',
+                'kind': 'method',
+                'source': source,
+            },
+            'related_tests': [],
+            'contract_context': {'related_symbols': []},
+        },
+    )
+
+    prompt, _metrics = build_coder_user_prompt(template, request, {}, config)
+
+    assert 'Сохраняемые элементы текущей реализации' in prompt
+    assert 'Порядок сохраняемых действий' in prompt
+    assert 'item.identifier = self.identifier_for(item)' in prompt
+    assert 'self.writer.write(item, data)' in prompt
+    assert 'str(item.identifier)' in prompt
+    assert 'NoteStorage' not in prompt
+
+
+def test_repair_template_has_preservation_block_placeholder() -> None:
+    template = Path('prompts/repair_user_template.txt').read_text(encoding='utf-8')
+
+    assert '{preservation_guidance_block}' in template
+    assert 'Сохраняемые элементы текущей реализации' in template
+
+
+def test_coder_prompt_renders_available_imports_block() -> None:
+    from codegenerator.config import load_config
+    from codegenerator.models.requests import GenerationRequest
+    from codegenerator.prompts.prompt_builder import build_coder_user_prompt
+
+    template = Path('prompts/coder_user_template.txt').read_text(encoding='utf-8')
+    config = load_config('config.yaml')
+    request = GenerationRequest(
+        request_id='available-imports-coder',
+        mode='generate',
+        change_request={
+            'title': 'Обновить метод',
+            'description': 'Использовать текущее время.',
+            'constraints': ['Сохранить текущую структуру.'],
+        },
+        target={
+            'qualname': 'app.storage.Storage.save',
+            'file_path': 'app/storage.py',
+            'operation': 'replace_symbol',
+            'insert_scope': 'class_body',
+        },
+        project_context={
+            'available_imports': [
+                {
+                    'name': 'datetime',
+                    'kind': 'from_import',
+                    'module': 'datetime',
+                    'imported': 'datetime',
+                    'source': 'from datetime import datetime',
+                },
+                {
+                    'name': 'json',
+                    'kind': 'import',
+                    'module': 'json',
+                    'source': 'import json',
+                },
+            ],
+            'module_outline': [],
+            'target_symbol': {
+                'qualname': 'app.storage.Storage.save',
+                'name': 'save',
+                'kind': 'method',
+                'source': 'def save(self, item):\n    return item\n',
+            },
+            'related_tests': [],
+            'contract_context': {'related_symbols': []},
+        },
+    )
+
+    prompt, metrics = build_coder_user_prompt(template, request, {}, config)
+
+    assert 'Доступные imports и имена целевого файла' in prompt
+    assert 'datetime: from datetime import datetime' in prompt
+    assert 'json: import json' in prompt
+    assert metrics['coder_available_imports_chars'] > 0
+
+
+def test_repair_prompt_marks_import_only_scope() -> None:
+    from codegenerator.config import load_config
+    from codegenerator.models.requests import RepairRequest
+    from codegenerator.prompts.prompt_builder import build_repair_user_prompt
+
+    template = Path('prompts/repair_user_template.txt').read_text(encoding='utf-8')
+    config = load_config('config.yaml')
+    request = RepairRequest(
+        request_id='repair-import-only',
+        mode='repair',
+        previous_generation_request_id='generate-save',
+        change_request={
+            'title': 'Исправить импорт',
+            'description': 'Использовать доступный импорт.',
+            'constraints': [],
+        },
+        error_context={
+            'verification_summary': {
+                'failed_blocks': [
+                    {
+                        'name': 'patch_static_semantics',
+                        'issues': [
+                            {
+                                'code': 'unresolved_import_change_module',
+                                'message': 'bad import',
+                            }
+                        ],
+                    }
+                ]
+            }
+        },
+        previous_artifact={
+            'target_file': 'app/storage.py',
+            'target_symbol': 'app.storage.Storage.save',
+            'operation': 'replace_symbol',
+            'code': 'def save(self, item):\n    return item\n',
+            'import_changes': [{'action': 'add_import', 'module': 'datetime'}],
+        },
+        project_context={
+            'available_imports': [
+                {
+                    'name': 'datetime',
+                    'kind': 'from_import',
+                    'module': 'datetime',
+                    'imported': 'datetime',
+                    'source': 'from datetime import datetime',
+                }
+            ],
+            'target_symbol': {
+                'qualname': 'app.storage.Storage.save',
+                'name': 'save',
+                'kind': 'method',
+                'source': 'def save(self, item):\n    return item\n',
+            },
+            'module_outline': [],
+            'contract_context': {'related_symbols': []},
+        },
+    )
+
+    prompt = build_repair_user_prompt(template, request, config)
+
+    assert 'Область repair' in prompt
+    assert 'только imports' in prompt
+    assert 'Доступные imports и имена целевого файла' in prompt
+    assert 'datetime: from datetime import datetime' in prompt
+
+
+def test_test_prompts_prefer_constructor_fields_over_post_init_assignment() -> None:
+    planner_template = Path('prompts/test_planner_user_template.txt').read_text(encoding='utf-8')
+    generator_template = Path('prompts/test_generator_user_template.txt').read_text(encoding='utf-8')
+
+    expected = 'передавай его через keyword-аргумент конструктора'
+    assert expected in planner_template
+    assert expected in generator_template
+    assert 'не ожидай фиксированную заранее придуманную дату' in planner_template
+    assert 'не ожидай фиксированную заранее придуманную дату' in generator_template
+
+
+def test_generated_test_review_template_flags_removed_dict_keys() -> None:
+    template = Path('prompts/generated_test_review_user_template.txt').read_text(encoding='utf-8')
+
+    assert 'удаление ключа из явно создаваемого словаря' in template
+    assert 'считай это production_risk' in template
+    assert 'передать значение через конструктор' in template

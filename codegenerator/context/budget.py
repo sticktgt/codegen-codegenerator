@@ -192,6 +192,30 @@ def _trim_target_source(request: dict[str, Any], source_limit: int, trim_log: li
         target_symbol["truncated"] = True
 
 
+
+_PRESERVE_EXISTING_MARKERS = (
+    "сохран", "не менять", "без изменения", "остав", "текущ", "существующ",
+    "структур", "формат", "публичн", "контракт", "кроме",
+)
+
+
+def _request_asks_to_preserve_existing_behavior(request: dict[str, Any]) -> bool:
+    change_request = request.get("change_request") or {}
+    parts = [
+        str(change_request.get("title", "") or ""),
+        str(change_request.get("description", "") or ""),
+        *[str(item) for item in (change_request.get("constraints") or []) if item],
+    ]
+    text = "\n".join(parts).lower()
+    return any(marker in text for marker in _PRESERVE_EXISTING_MARKERS)
+
+
+def _requested_operation(request: dict[str, Any]) -> str:
+    target = request.get("target") or {}
+    previous = request.get("previous_artifact") or {}
+    return str(target.get("operation") or previous.get("operation") or "replace_symbol")
+
+
 def _trim_previous_artifact(request: dict[str, Any], code_limit: int, trim_log: list[str]) -> None:
     previous_artifact = request.get("previous_artifact") or {}
     code = str(previous_artifact.get("code", ""))
@@ -295,7 +319,10 @@ def apply_budget_strategy(
             source_limit=config.repair_max_contract_symbol_chars,
             trim_log=trim_log,
         )
-        _trim_target_source(request, source_limit=budget.repair_target_source_limit, trim_log=trim_log)
+        repair_target_limit = budget.repair_target_source_limit
+        if _requested_operation(request) == "replace_symbol" and _request_asks_to_preserve_existing_behavior(request):
+            repair_target_limit = max(repair_target_limit, 2200)
+        _trim_target_source(request, source_limit=repair_target_limit, trim_log=trim_log)
 
     else:  # generate
         _trim_module_outline(request, keep=budget.generate_module_outline_keep, trim_log=trim_log)
@@ -311,7 +338,10 @@ def apply_budget_strategy(
             source_limit=config.coder_max_contract_symbol_chars,
             trim_log=trim_log,
         )
-        _trim_target_source(request, source_limit=budget.generate_target_source_limit, trim_log=trim_log)
+        generate_target_limit = budget.generate_target_source_limit
+        if _requested_operation(request) == "replace_symbol" and _request_asks_to_preserve_existing_behavior(request):
+            generate_target_limit = max(generate_target_limit, 3200)
+        _trim_target_source(request, source_limit=generate_target_limit, trim_log=trim_log)
 
     metrics_after = _context_metrics_from_request(request)
     request["context_metrics"] = {

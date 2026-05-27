@@ -6,7 +6,7 @@ llm:
     timeout_sec: 420 # 600
     think: false
     temperature: 0.0
-    num_ctx: 16384 # 4096 
+    num_ctx: 32768 # 4096 
     num_predict: 4096 # 1600 # 600 
     keep_alive: 0
     options: {}
@@ -37,24 +37,24 @@ codegenerator:
     max_repair_attempts: 1
     test_generation_mode: "always"
     test_generator_max_example_tests: 1
-    coder_prompt_target_chars: 18000
-    coder_prompt_hard_limit: 18000
+    coder_prompt_target_chars: 42000
+    coder_prompt_hard_limit: 42000
     coder_max_reference_artifacts: 1
-    coder_max_reference_chars: 1400
-    coder_max_full_file_chars: 2200
-    coder_max_contract_symbols: 4
-    coder_max_contract_symbol_chars: 900
-    repair_prompt_hard_limit: 18000
-    repair_max_reference_chars: 900
-    repair_max_contract_symbols: 4
-    repair_max_contract_symbol_chars: 700
-    test_prompt_reference_chars: 900
-    test_prompt_contract_symbols: 4
-    test_prompt_contract_symbol_chars: 700
+    coder_max_reference_chars: 2200
+    coder_max_full_file_chars: 20000
+    coder_max_contract_symbols: 8
+    coder_max_contract_symbol_chars: 1800
+    repair_prompt_hard_limit: 42000
+    repair_max_reference_chars: 1600
+    repair_max_contract_symbols: 8
+    repair_max_contract_symbol_chars: 1600
+    test_prompt_reference_chars: 1600
+    test_prompt_contract_symbols: 8
+    test_prompt_contract_symbol_chars: 1600
 
-    test_prompt_related_tests_truncate_chars: 500
-    test_prompt_full_file_truncate_chars: 700
-    test_prompt_target_truncate_chars: 500
+    test_prompt_related_tests_truncate_chars: 1200
+    test_prompt_full_file_truncate_chars: 20000
+    test_prompt_target_truncate_chars: 2200
 
   defaults:
     constraints:
@@ -70,45 +70,45 @@ codegenerator:
     output_dir: "runs"
 
   prompt_budget:
-    generate_chars_limit: 18000
-    generate_test_chars_limit: 20000
-    repair_chars_limit: 18000
-    min_user_prompt_chars: 500
-    user_prompt_reserve_chars: 300
+    generate_chars_limit: 42000
+    generate_test_chars_limit: 42000
+    repair_chars_limit: 42000
+    min_user_prompt_chars: 1200
+    user_prompt_reserve_chars: 600
 
   prompt_assembly:
     allowed_api_surface_chars: 2200
     generate_block_chars:
-      module_outline: 1000
-      target_source: 1400
-      full_file: 2600
-      related_tests: 700
-      contract_context: 3600
-      allowed_api_surface: 2400
-      reference: 700
-      contract_attribute_requirements: 1800
+      module_outline: 3000
+      target_source: 5000
+      full_file: 20000
+      related_tests: 3000
+      contract_context: 10000
+      allowed_api_surface: 6000
+      reference: 2000
+      contract_attribute_requirements: 5000
     repair_block_chars:
-      module_outline: 600
-      target_source: 900
-      full_file: 1000
-      previous_code: 1200
-      contract_context: 2800
-      allowed_api_surface: 2400
-      reference: 500
-      repair_problem: 2500
+      module_outline: 2500
+      target_source: 5000
+      full_file: 20000
+      previous_code: 5000
+      contract_context: 10000
+      allowed_api_surface: 6000
+      reference: 1600
+      repair_problem: 7000
     test_reference_max_items: 1
     test_planner_related_tests_max_items: 1
     test_planner_related_tests_per_item_chars: 700
     test_planner_inferred_symbols_count: 20
-    test_planner_full_file_chars: 1500
-    test_planner_related_tests_chars: 700
-    test_planner_import_context_chars: 600
-    test_planner_inferred_symbols_chars: 400
+    test_planner_full_file_chars: 20000
+    test_planner_related_tests_chars: 3000
+    test_planner_import_context_chars: 1500
+    test_planner_inferred_symbols_chars: 1200
     test_insert_after_example_chars: 260
     test_insert_after_import_context_chars: 220
     test_insert_after_inferred_symbols_chars: 120
     test_insert_after_request_chars: 180
-    test_soft_overflow_chars: 500
+    test_soft_overflow_chars: 3000
     test_generator_plan_fields:
       - target_symbol
       - test_intent

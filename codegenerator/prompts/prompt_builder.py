@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import textwrap
 from typing import Any
 import logging
 
@@ -61,6 +62,8 @@ def _render_related_tests(
     project_context: dict[str, Any],
     max_items: int,
     per_item_chars: int,
+    *,
+    strip_source_docstrings: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     tests = list(project_context.get("related_tests") or [])[:max_items]
     blocks: list[str] = []
@@ -72,6 +75,8 @@ def _render_related_tests(
         if not raw_source:
             continue
         source = raw_source
+        if strip_source_docstrings and source:
+            source, _ = _strip_docstrings_from_python_source(source)
         if per_item_chars > 0 and len(source) > per_item_chars:
             source, _ = _truncate_text(source, per_item_chars)
         qualname = str(item.get("qualname", "") or item.get("name", "") or "")
@@ -95,6 +100,8 @@ def _render_reference_artifacts(
     reference_context: dict[str, Any],
     max_items: int,
     per_item_chars: int,
+    *,
+    strip_source_docstrings: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     artifacts = list(reference_context.get("reference_artifacts") or [])[:max_items]
     blocks: list[str] = []
@@ -105,6 +112,8 @@ def _render_reference_artifacts(
     for item in artifacts:
         raw_content = str(item.get("content", ""))
         content = raw_content
+        if strip_source_docstrings and content:
+            content, _ = _strip_docstrings_from_python_source(content)
         if per_item_chars > 0 and len(content) > per_item_chars:
             content, _ = _truncate_text(content, per_item_chars)
         title = str(item.get("title", ""))
@@ -502,6 +511,10 @@ def _required_project_imports_from_symbols(
         if isinstance(item, dict):
             add_import_for_item(item)
 
+    for item in project_context.get("required_contracts") or []:
+        if isinstance(item, dict):
+            add_import_for_item(item)
+
     for item in project_context.get("model_surfaces") or []:
         if isinstance(item, dict):
             add_import_for_item(item)
@@ -658,6 +671,143 @@ def _required_project_imports_for_tests(
     return "\n".join(imports)
 
 
+_DOCSTRING_START_RE = re.compile(r"^[ \t]*(?:[rRuUbB]{0,3})?(\"\"\"|\'\'\')")
+_HEADER_START_RE = re.compile(r"^[ \t]*(?:async[ \t]+def|def|class)[ \t]+.*:[ \t]*(?:#.*)?$")
+
+
+def _line_indent_width(line: str) -> int:
+    return len(line) - len(line.lstrip(" \t"))
+
+
+def _docstring_quote_at_line_start(line: str) -> str | None:
+    match = _DOCSTRING_START_RE.match(line)
+    return str(match.group(1)) if match else None
+
+
+def _skip_docstring_block(lines: list[str], start_index: int, quote: str) -> int:
+    """Return the first line index after a standalone docstring block."""
+    line = lines[start_index]
+    # A one-line docstring contains both the opening and the closing triple
+    # quote on the same line. Count occurrences instead of looking only at the
+    # suffix because docstrings can have a prefix like r"""...""".
+    if line.count(quote) >= 2:
+        return start_index + 1
+
+    index = start_index + 1
+    while index < len(lines):
+        if quote in lines[index]:
+            return index + 1
+        index += 1
+    return index
+
+
+def _strip_docstrings_from_python_source_by_lines(source: str) -> tuple[str, bool]:
+    """Best-effort docstring removal for incomplete source excerpts.
+
+    Some project-context snippets are not complete Python modules, so AST parsing
+    can fail. For generated-test prompts we still want to remove examples from
+    module/class/function docstrings while leaving executable code untouched.
+    """
+    raw = str(source or "")
+    if not raw.strip():
+        return raw, False
+
+    lines = raw.splitlines()
+    kept: list[str] = []
+    changed = False
+    module_docstring_allowed = True
+    pending_header_indent: int | None = None
+    index = 0
+
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.strip()
+        significant = bool(stripped) and not stripped.startswith("#")
+
+        if not significant:
+            kept.append(line)
+            index += 1
+            continue
+
+        indent = _line_indent_width(line)
+        quote = _docstring_quote_at_line_start(line)
+        header_docstring_allowed = (
+            pending_header_indent is not None and indent > pending_header_indent
+        )
+
+        if quote and (module_docstring_allowed or header_docstring_allowed):
+            index = _skip_docstring_block(lines, index, quote)
+            changed = True
+            module_docstring_allowed = False
+            pending_header_indent = None
+            continue
+
+        module_docstring_allowed = False
+        if pending_header_indent is not None and indent <= pending_header_indent:
+            pending_header_indent = None
+
+        if _HEADER_START_RE.match(line):
+            pending_header_indent = indent
+
+        kept.append(line)
+        index += 1
+
+    if not changed:
+        return raw, False
+
+    # Preserve the original trailing newline convention when possible.
+    rendered = "\n".join(kept)
+    if raw.endswith("\n"):
+        rendered += "\n"
+    return rendered, True
+
+
+def _strip_docstrings_from_python_source(source: str) -> tuple[str, bool]:
+    """Return Python source without module/class/function docstrings.
+
+    The helper is used only for generated-test prompt rendering. It does not
+    change generated artifacts or project source files. If a snippet cannot be
+    parsed as a complete Python module, a conservative line-based fallback is
+    used for source excerpts.
+    """
+    raw = str(source or "")
+    if not raw.strip():
+        return raw, False
+
+    try:
+        tree = ast.parse(textwrap.dedent(raw))
+    except SyntaxError:
+        return _strip_docstrings_from_python_source_by_lines(raw)
+
+    changed = False
+
+    def remove_docstring(body: list[ast.stmt]) -> None:
+        nonlocal changed
+        if not body:
+            return
+        first = body[0]
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            del body[0]
+            changed = True
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            remove_docstring(node.body)
+
+    if not changed:
+        return _strip_docstrings_from_python_source_by_lines(raw)
+
+    try:
+        return ast.unparse(tree).strip(), True
+    except Exception:
+        logger.debug("failed to unparse source without docstrings", exc_info=True)
+        return _strip_docstrings_from_python_source_by_lines(raw)
+
+
 def _required_repair_import_changes_text(
     required_imports_text: str,
     error_context: dict[str, Any],
@@ -772,14 +922,22 @@ def _render_contract_context(
     project_context: dict[str, Any],
     max_items: int,
     per_item_chars: int,
+    *,
+    include_docstrings: bool = True,
+    strip_source_docstrings: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     symbols = _contract_symbols_from_project_context(project_context)[:max(0, max_items)]
     blocks: list[str] = []
     total_chars = 0
     qualnames: list[str] = []
+    stripped_source_count = 0
 
     for item in symbols:
         source = str(item.get("source_excerpt", "") or "")
+        if strip_source_docstrings and source:
+            source, source_docstrings_removed = _strip_docstrings_from_python_source(source)
+            if source_docstrings_removed:
+                stripped_source_count += 1
         if per_item_chars > 0 and len(source) > per_item_chars:
             source, _ = _truncate_text(source, per_item_chars)
         qualname = str(item.get("qualname", "") or item.get("name", "") or "")
@@ -803,10 +961,15 @@ def _render_contract_context(
         ]
         if signature:
             lines.append(f"Signature: {signature}")
-        if docstring:
+        if include_docstrings and docstring:
             lines.append(f"Docstring: {docstring[:180]}")
         if source:
-            lines.append("Source excerpt:")
+            source_header = (
+                "Executable source excerpt without documentation:"
+                if strip_source_docstrings
+                else "Source excerpt:"
+            )
+            lines.append(source_header)
             lines.append(source)
             total_chars += len(source)
         blocks.append("\n".join(lines))
@@ -821,6 +984,7 @@ def _render_contract_context(
         "contract_symbols_count": len(blocks),
         "contract_symbol_chars": total_chars,
         "contract_symbol_qualnames": qualnames,
+        "contract_symbol_sources_docstrings_removed": stripped_source_count,
         **model_surfaces_metrics,
     }
     return rendered, metrics
@@ -867,7 +1031,7 @@ def _render_required_contracts(
 
 def _render_required_class_members(
     project_context: dict[str, Any],
-    max_chars: int = 1200,
+    max_chars: int = 1600,
 ) -> tuple[str, dict[str, Any]]:
     members = project_context.get("required_class_members") or (
         (project_context.get("contract_context") or {}).get("required_class_members")
@@ -1028,6 +1192,23 @@ _REQUEST_OUTPUT_MARKERS = (
     "имя", "строк", "literal", "литерал", "точно",
 )
 
+
+_PRESERVE_EXISTING_MARKERS = (
+    "сохран", "не менять", "без изменения", "остав", "текущ", "существующ",
+    "структур", "формат", "публичн", "контракт", "кроме",
+)
+
+
+def _request_asks_to_preserve_existing_behavior_for_change_request(change_request: dict[str, Any] | None) -> bool:
+    change_request = change_request or {}
+    parts = [
+        str(change_request.get("title", "") or ""),
+        str(change_request.get("description", "") or ""),
+        *[str(item) for item in (change_request.get("constraints") or []) if item],
+    ]
+    text = "\n".join(parts).lower()
+    return any(marker in text for marker in _PRESERVE_EXISTING_MARKERS)
+
 _LITERAL_TOKEN_RE = re.compile(
     r"`([^`]+)`|\"([^\"]+)\"|'([^']+)'|(?<![\w/])\.[A-Za-z0-9][A-Za-z0-9_.-]{0,30}(?![\w/])|\b[A-Za-z_][A-Za-z0-9_]*_[A-Za-z0-9_]*\b|\b[A-Z][A-Za-z0-9_]{2,}\b|\b[YMDAHhmsS_-]{4,}\b"
 )
@@ -1064,7 +1245,7 @@ def _render_request_output_obligations(change_request: dict[str, Any]) -> str:
 
     This is intentionally generic: it does not know about specific examples like
     file extensions. It only extracts statements and literals that are explicitly
-    present in the user's CR, so old docstrings and related context cannot silently
+    present in the user's request, so old docstrings and related context cannot silently
     override them in code or generated tests.
     """
     title = str(change_request.get("title", "") or "")
@@ -1096,16 +1277,216 @@ def _render_request_output_obligations(change_request: dict[str, Any]) -> str:
         return ""
 
     lines = [
-        "Explicit request output and literal obligations:",
-        "These requirements are derived only from the user's CR and override old docstrings, target source, related tests and planner wording when they conflict.",
+        "Явные требования запроса к результату и литералам:",
+        "Эти требования извлечены только из пользовательского запроса. Если они противоречат старому описанию, исходному коду или связанным тестам, приоритет имеет пользовательский запрос.",
     ]
     if obligation_statements:
-        lines.append("User output/format requirements:")
+        lines.append("Требования к наблюдаемому результату или формату:")
         lines.extend(f"- {item}" for item in obligation_statements[:8])
     if literals:
-        lines.append("User-specified literals/names/formats to preserve in behavior and tests:")
+        lines.append("Имена, литералы и форматы, которые нужно сохранить в поведении и тестах:")
         lines.extend(f"- {item}" for item in literals[:12])
     return "\n".join(lines)
+
+
+
+_PRESERVE_EXISTING_MARKERS = (
+    "сохран", "не менять", "без изменения", "остав", "текущ", "существующ",
+    "структур", "формат", "публичн", "контракт", "кроме",
+)
+
+
+def _request_asks_to_preserve_existing_behavior(change_request: dict[str, Any]) -> bool:
+    parts = [
+        str(change_request.get("title", "") or ""),
+        str(change_request.get("description", "") or ""),
+        *[str(item) for item in (change_request.get("constraints") or []) if item],
+    ]
+    text = "\n".join(parts).lower()
+    return any(marker in text for marker in _PRESERVE_EXISTING_MARKERS)
+
+
+def _safe_unparse(node: ast.AST, max_chars: int = 120) -> str:
+    try:
+        text = ast.unparse(node).strip()
+    except Exception:
+        return ""
+    text = re.sub(r"\s+", " ", text)
+    if len(text) > max_chars:
+        return text[: max_chars - 1].rstrip() + "…"
+    return text
+
+
+def _append_unique_limited(items: list[str], value: str, limit: int) -> None:
+    value = str(value or "").strip()
+    if value and value not in items and len(items) < limit:
+        items.append(value)
+
+
+
+
+def _statement_primary_action(stmt: ast.stmt) -> str:
+    """Return a compact, generic description of one top-level action."""
+    if isinstance(stmt, ast.If):
+        condition = _safe_unparse(stmt.test, 110)
+        nested_actions: list[str] = []
+        for child in stmt.body[:3]:
+            action = _statement_primary_action(child)
+            if action:
+                nested_actions.append(action)
+        suffix = f" -> {'; '.join(nested_actions)}" if nested_actions else ""
+        return f"if {condition}:{suffix}" if condition else ""
+    if isinstance(stmt, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+        return _safe_unparse(stmt, 160)
+    if isinstance(stmt, ast.Expr):
+        return _safe_unparse(stmt.value, 140)
+    if isinstance(stmt, ast.With):
+        items = ", ".join(_safe_unparse(item.context_expr, 90) for item in stmt.items)
+        items = re.sub(r"\s+", " ", items).strip()
+        nested_actions = []
+        for child in stmt.body[:2]:
+            action = _statement_primary_action(child)
+            if action:
+                nested_actions.append(action)
+        suffix = f" -> {'; '.join(nested_actions)}" if nested_actions else ""
+        return f"with {items}:{suffix}" if items else ""
+    if isinstance(stmt, ast.Return):
+        value = _safe_unparse(stmt.value, 120) if stmt.value is not None else ""
+        return f"return {value}".strip()
+    if isinstance(stmt, ast.Try):
+        nested_actions = []
+        for child in stmt.body[:2]:
+            action = _statement_primary_action(child)
+            if action:
+                nested_actions.append(action)
+        suffix = f": {'; '.join(nested_actions)}" if nested_actions else ""
+        return f"try{suffix}"
+    return ""
+
+
+def _ordered_actions_from_tree(tree: ast.AST, limit: int = 14) -> list[str]:
+    """Extract top-level action order from a function/class/module source tree."""
+    body: list[ast.stmt] = []
+    for node in getattr(tree, "body", []):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            body = list(getattr(node, "body", []))
+            break
+    if not body:
+        body = list(getattr(tree, "body", []))
+
+    actions: list[str] = []
+    for stmt in body:
+        # Docstrings are not behavior-order anchors.
+        if (
+            isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Constant)
+            and isinstance(stmt.value.value, str)
+        ):
+            continue
+        action = _statement_primary_action(stmt)
+        if action:
+            _append_unique_limited(actions, action, limit)
+    return actions
+
+def _render_replace_symbol_preservation_guidance(
+    *,
+    operation: str,
+    change_request: dict[str, Any],
+    target_source: str,
+    max_chars: int = 1600,
+) -> str:
+    """Render compact source-derived anchors for cautious replace_symbol edits.
+
+    The extraction is generic and does not contain project-specific names. Concrete
+    names appear only when they are already present in the provided target source.
+    """
+    if str(operation or "").strip() != "replace_symbol":
+        return ""
+    if not _request_asks_to_preserve_existing_behavior(change_request):
+        return ""
+
+    source = textwrap.dedent(str(target_source or "")).strip()
+    if not source or "# ... truncated" in source:
+        # A truncated method is unsafe as a preservation source: rendered anchors
+        # could be misleadingly incomplete. Template rules still require minimal edits.
+        return (
+            "Исходный target-код обрезан. Для замены symbol используй минимальное изменение: "
+            "не переписывай реализацию с нуля и не меняй видимые вызовы, аргументы, "
+            "формат данных и return-shape без явного требования пользователя."
+        )
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return ""
+
+    ordered_actions = _ordered_actions_from_tree(tree)
+    calls: list[str] = []
+    assignments: list[str] = []
+    conditions: list[str] = []
+    dict_keys: list[str] = []
+    returns: list[str] = []
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            call_text = _safe_unparse(node, 140)
+            if call_text:
+                _append_unique_limited(calls, call_text, 10)
+        elif isinstance(node, ast.Assign):
+            assignment_text = _safe_unparse(node, 160)
+            if assignment_text:
+                _append_unique_limited(assignments, assignment_text, 10)
+        elif isinstance(node, ast.AnnAssign):
+            assignment_text = _safe_unparse(node, 160)
+            if assignment_text:
+                _append_unique_limited(assignments, assignment_text, 10)
+        elif isinstance(node, ast.AugAssign):
+            assignment_text = _safe_unparse(node, 160)
+            if assignment_text:
+                _append_unique_limited(assignments, assignment_text, 10)
+        elif isinstance(node, ast.If):
+            condition_text = _safe_unparse(node.test, 120)
+            if condition_text:
+                _append_unique_limited(conditions, condition_text, 8)
+        elif isinstance(node, ast.Dict):
+            for key in node.keys:
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    _append_unique_limited(dict_keys, key.value, 12)
+        elif isinstance(node, ast.Return) and node.value is not None:
+            return_text = _safe_unparse(node.value, 120)
+            if return_text:
+                _append_unique_limited(returns, return_text, 4)
+
+    if not any((ordered_actions, calls, assignments, conditions, dict_keys, returns)):
+        return ""
+
+    lines: list[str] = [
+        "Этот блок извлечен из текущей реализации. Если пользовательский запрос не требует обратного, сохрани эти элементы без замены альтернативной реализацией и меняй только необходимые строки.",
+        "Сохраняй не только наличие перечисленных действий, но и их порядок. Новое действие вставляй в минимально подходящее место до первого использования значения, которое это действие обновляет.",
+    ]
+    if ordered_actions:
+        lines.append("Порядок сохраняемых действий:")
+        lines.extend(f"{idx}. {item}" for idx, item in enumerate(ordered_actions, start=1))
+    if conditions:
+        lines.append("Условия ветвления:")
+        lines.extend(f"- {item}" for item in conditions)
+    if assignments:
+        lines.append("Присваивания и изменяемые значения:")
+        lines.extend(f"- {item}" for item in assignments)
+    if calls:
+        lines.append("Видимые вызовы и их аргументы:")
+        lines.extend(f"- {item}" for item in calls)
+    if dict_keys:
+        lines.append("Ключи явно создаваемых словарей:")
+        lines.extend(f"- {item}" for item in dict_keys)
+    if returns:
+        lines.append("Форма возвращаемого значения:")
+        lines.extend(f"- {item}" for item in returns)
+
+    rendered = "\n".join(lines)
+    if len(rendered) > max_chars:
+        rendered, _ = _truncate_text(rendered, max_chars)
+    return rendered
 
 
 def _render_constraints_block(constraints: list[str], limit: int = 6) -> str:
@@ -1296,6 +1677,7 @@ def build_test_planner_user_prompt(
     else:
         target_source = str(target_symbol.get("source") or "").strip()
         target_source_origin = "project_context.target_symbol"
+    target_executable_source, target_docstrings_removed = _strip_docstrings_from_python_source(target_source)
 
     compact_request_text = _compact_change_request_for_codegen(
         request.change_request,
@@ -1312,7 +1694,7 @@ def build_test_planner_user_prompt(
     # rendered full-file block may be trimmed later, but constructor guidance
     # must remain based on the complete source when it is available.
     full_file_source_for_guidance = str(pc.get("full_file_source", "") or "").strip()
-    full_file_source = full_file_source_for_guidance
+    full_file_source, full_file_docstrings_removed = _strip_docstrings_from_python_source(full_file_source_for_guidance)
     planner_related_tests_max_items = (
         runtime_config.prompt_assembly.test_planner_related_tests_max_items
         if runtime_config
@@ -1327,6 +1709,7 @@ def build_test_planner_user_prompt(
         pc,
         max_items=planner_related_tests_max_items,
         per_item_chars=planner_related_tests_per_item_chars,
+        strip_source_docstrings=True,
     )
     if related_tests_text == "none":
         related_tests_text = ""
@@ -1339,6 +1722,8 @@ def build_test_planner_user_prompt(
         pc,
         max_items=runtime_config.test_prompt_contract_symbols if runtime_config else 3,
         per_item_chars=runtime_config.test_prompt_contract_symbol_chars if runtime_config else 500,
+        include_docstrings=False,
+        strip_source_docstrings=True,
     )
     model_surfaces_text, model_surfaces_metrics = _render_model_surfaces(
         pc,
@@ -1360,7 +1745,7 @@ def build_test_planner_user_prompt(
     required_imports_text = _required_project_imports_for_tests(pc, request.change_request)
 
     import_context_text = _extract_import_context(full_file_source)
-    inferred_symbols = _infer_project_symbols(target_source)
+    inferred_symbols = _infer_project_symbols(target_executable_source)
     inferred_symbols_limit = (
         runtime_config.prompt_assembly.test_planner_inferred_symbols_count
         if runtime_config
@@ -1393,11 +1778,10 @@ def build_test_planner_user_prompt(
     source_priority_text = ""
     if target_source_origin == "generated_code_artifact":
         source_priority_text = (
-            "Главный источник истины для теста — сгенерированный target-код выше. "
-            "Полный исходный текст целевого файла ниже является справочным контекстом до изменения: "
-            "используй его для импортов, стиля и окружающего кода. "
-            "Если сгенерированный target-код и старый исходный файл противоречат друг другу "
-            "по полям, аргументам конструктора, методам или ключам словаря, используй сгенерированный target-код."
+            "Главный источник истины для теста — исполняемый код проверяемого метода без документации. "
+            "Справочный контекст целевого файла и связанных методов используй только для импортов, сигнатур, стиля и окружающего кода. "
+            "Документация, комментарии и примеры нужны только для общего понимания. "
+            "Если пример из справочного контекста отличается от исполняемого кода, используй исполняемый код."
         )
 
     values = {
@@ -1408,7 +1792,7 @@ def build_test_planner_user_prompt(
         "insert_scope": request.target.get("insert_scope") or "",
         "expected_new_symbol_kind": request.target.get("expected_new_symbol_kind") or "",
         "parent_qualname": request.target.get("parent_qualname") or "",
-        "target_source": target_source or "none",
+        "target_source": target_executable_source or "none",
         "full_file_source": full_file_source or "none",
         "related_tests_block": _render_optional_block("Связанные тесты проекта", related_tests_text),
         "import_context_block": _render_optional_block("Импорты из целевого файла", import_context_text),
@@ -1422,8 +1806,10 @@ def build_test_planner_user_prompt(
         "test_behavior_guidance_block": _render_optional_block(
             "Target-derived test data strategy",
             _render_test_behavior_guidance(
-                target_source,
+                target_executable_source,
                 target_file=str(request.target.get("file_path", "") or ""),
+                full_file_source=full_file_source_for_guidance,
+                contract_context_text=contract_context_text,
             ),
         ),
         "constructor_guidance_block": _render_optional_block(
@@ -1634,6 +2020,10 @@ def build_coder_user_prompt(
     requested_operation = str(
         request.target.get("operation", "replace_symbol") or "replace_symbol"
     ).strip()
+    preserve_existing_mode = (
+        requested_operation == "replace_symbol"
+        and _request_asks_to_preserve_existing_behavior_for_change_request(request.change_request)
+    )
 
     module_outline_text = _normalize_optional_value(
         _render_module_outline(pc.get("module_outline", []))
@@ -1672,16 +2062,26 @@ def build_coder_user_prompt(
     )
     contract_context_text = _normalize_optional_value(contract_context_text)
 
+    preservation_guidance_text = _render_replace_symbol_preservation_guidance(
+        operation=requested_operation,
+        change_request=request.change_request,
+        target_source=target_text,
+    )
     coder_visible_facts_text, coder_visible_facts_metrics = _render_visible_implementation_facts(
         pc,
         max_chars=getattr(runtime_config.prompt_assembly, "allowed_api_surface_chars", 1600),
     )
     coder_visible_facts_text = _normalize_optional_value(coder_visible_facts_text)
     required_imports_text = _required_project_imports_for_codegen(pc, request.change_request)
+    available_imports_text = _render_available_imports(pc)
+    available_import_lines = _available_import_lines_from_project_context(pc)
     full_file_import_context_text = _extract_import_context(full_file_text or str(pc.get("full_file_source", "") or ""))
+    existing_import_context_text = "\n".join(
+        part for part in [available_import_lines, full_file_import_context_text] if part
+    )
     required_codegen_import_changes_text = _required_import_changes_from_import_lines(
         required_imports_text,
-        existing_import_context=full_file_import_context_text,
+        existing_import_context=existing_import_context_text,
     )
     if required_codegen_import_changes_text:
         coder_visible_facts_text = (
@@ -1728,11 +2128,51 @@ def build_coder_user_prompt(
 
     # Реальный предел, после которого уже надо агрессивно ужиматься.
     effective_limit = runtime_limit or hard_limit or soft_limit or 0
+    if preserve_existing_mode:
+        # Для replace_symbol-задач, где пользователь просит сохранить структуру/формат,
+        # потеря контекста опаснее умеренного увеличения prompt-а. Держим локальный
+        # минимум даже если старая конфигурация еще не обновлена.
+        soft_limit = max(soft_limit, 38000) if soft_limit else 38000
+        effective_limit = max(effective_limit, 38000) if effective_limit else 38000
 
     trim_steps: list[str] = []
 
     def _record(step: str) -> None:
         trim_steps.append(step)
+
+    preservation_guidance_block = _render_optional_block(
+        "Сохраняемые элементы текущей реализации",
+        preservation_guidance_text,
+    )
+
+    planner_json_text = _pretty(effective_planner_result)
+
+    def _section_sizes(
+        *,
+        stage: str,
+        module_outline_value: str,
+        target_value: str,
+        full_file_value: str,
+        reference_value: str,
+        related_tests_value: str,
+        contract_context_value: str,
+        request_value: str,
+    ) -> dict[str, int | str | bool]:
+        return {
+            "stage": stage,
+            "preserve_existing_mode": preserve_existing_mode,
+            "request": len(_normalize_optional_value(request_value)),
+            "planner": len(planner_json_text),
+            "target": len(_normalize_optional_value(target_value)),
+            "module_outline": len(_normalize_optional_value(module_outline_value)),
+            "full_file": len(_normalize_optional_value(full_file_value)),
+            "related_tests": len(_normalize_optional_value(related_tests_value)),
+            "reference": len(_normalize_optional_value(reference_value)),
+            "contract_context": len(_normalize_optional_value(contract_context_value)),
+            "preservation_guidance": len(_normalize_optional_value(preservation_guidance_text)),
+            "available_imports": len(_normalize_optional_value(available_imports_text)),
+            "required_import_changes": len(_normalize_optional_value(required_codegen_import_changes_text)),
+        }
 
     def _render(
         module_outline_value: str,
@@ -1744,6 +2184,11 @@ def build_coder_user_prompt(
         request_value: str,
     ) -> str:
         return template_text.format(
+            preservation_guidance_block=preservation_guidance_block,
+            available_imports_block=_render_optional_block(
+                "Доступные imports и имена целевого файла",
+                available_imports_text,
+            ),
             required_codegen_import_changes_block=_render_optional_block(
                 "Required import_changes for names used by generated code",
                 required_codegen_import_changes_text,
@@ -1758,7 +2203,7 @@ def build_coder_user_prompt(
             or request.target.get("qualname", "")
             or "null",
             reference_symbol="null",
-            planner_json=_pretty(effective_planner_result),
+            planner_json=planner_json_text,
             request=request_value,
             module_outline_block=_render_optional_block(
                 "Структура модуля",
@@ -1828,9 +2273,26 @@ def build_coder_user_prompt(
         current_request,
     )
     before_trim = len(prompt)
+    logger.info(
+        "coder prompt section sizes request_id=%s stage=%s sizes=%s",
+        request.request_id,
+        "initial_base",
+        _section_sizes(
+            stage="initial_base",
+            module_outline_value=current_module_outline,
+            target_value=current_target,
+            full_file_value=current_full_file,
+            reference_value=current_reference,
+            related_tests_value=current_related_tests,
+            contract_context_value=current_contract_context,
+            request_value=current_request,
+        ),
+    )
 
-    # Если уже слишком длинно, сначала слегка ужимаем request/target/outline
-    if soft_limit and len(prompt) > soft_limit:
+    # Если уже слишком длинно, сначала слегка ужимаем низкоприоритетные секции.
+    # В preserve-mode не режем пользовательский запрос и target source: это
+    # именно те данные, которые должны дойти до модели полностью.
+    if soft_limit and len(prompt) > soft_limit and not preserve_existing_mode:
         current_request, _ = _truncate_text(current_request, 1400)
         _record("truncated request to 1400 in base prompt")
         prompt = _render(
@@ -1843,7 +2305,7 @@ def build_coder_user_prompt(
             current_request,
         )
 
-    if soft_limit and len(prompt) > soft_limit and current_target:
+    if soft_limit and len(prompt) > soft_limit and current_target and not preserve_existing_mode:
         current_target, _ = _truncate_text(current_target, 500)
         _record("truncated target to 500 in base prompt")
         prompt = _render(
@@ -1903,7 +2365,10 @@ def build_coder_user_prompt(
         )
 
         # Если вылезли слишком далеко за рабочую цель — откатываем этот блок.
-        if soft_limit and len(candidate_prompt) > soft_limit:
+        # Для preserve-mode ориентируемся на реальный лимит, а не на мягкую цель,
+        # чтобы не выбрасывать full_file/related_tests слишком рано.
+        optional_limit = effective_limit if preserve_existing_mode else soft_limit
+        if optional_limit and len(candidate_prompt) > optional_limit:
             current_full_file = prev_full_file
             current_related_tests = prev_related_tests
             current_contract_context = prev_contract_context
@@ -1982,7 +2447,7 @@ def build_coder_user_prompt(
             current_request,
         )
 
-    if effective_limit and len(prompt) > effective_limit and current_contract_context:
+    if effective_limit and len(prompt) > effective_limit and current_contract_context and not preserve_existing_mode:
         current_contract_context, _ = _truncate_text(current_contract_context, 900)
         _record("truncated protected contract_context to 900 on hard overflow")
         prompt = _render(
@@ -2008,7 +2473,7 @@ def build_coder_user_prompt(
             current_request,
         )
 
-    if effective_limit and len(prompt) > effective_limit and current_request:
+    if effective_limit and len(prompt) > effective_limit and current_request and not preserve_existing_mode:
         current_request, _ = _truncate_text(current_request, 1000)
         _record("truncated request to 1000 on hard overflow")
         prompt = _render(
@@ -2021,7 +2486,7 @@ def build_coder_user_prompt(
             current_request,
         )
 
-    if effective_limit and len(prompt) > effective_limit and current_target:
+    if effective_limit and len(prompt) > effective_limit and current_target and not preserve_existing_mode:
         current_target, _ = _truncate_text(current_target, 160)
         _record("truncated target to 160 on hard overflow")
         prompt = _render(
@@ -2032,6 +2497,33 @@ def build_coder_user_prompt(
             current_related_tests,
             current_contract_context,
             current_request,
+        )
+
+    final_section_sizes = _section_sizes(
+        stage="final",
+        module_outline_value=current_module_outline,
+        target_value=current_target,
+        full_file_value=current_full_file,
+        reference_value=current_reference,
+        related_tests_value=current_related_tests,
+        contract_context_value=current_contract_context,
+        request_value=current_request,
+    )
+    logger.info(
+        "coder prompt section sizes request_id=%s stage=%s sizes=%s",
+        request.request_id,
+        "final",
+        final_section_sizes,
+    )
+    if effective_limit and len(prompt) > effective_limit:
+        logger.warning(
+            "coder prompt remains over effective limit but protected sections were preserved request_id=%s operation=%s final_chars=%s effective_limit=%s preserve_existing_mode=%s section_sizes=%s",
+            request.request_id,
+            requested_operation,
+            len(prompt),
+            effective_limit,
+            preserve_existing_mode,
+            final_section_sizes,
         )
 
     metrics = _build_coder_prompt_metrics(
@@ -2052,6 +2544,9 @@ def build_coder_user_prompt(
     metrics["coder_visible_implementation_facts_chars"] = int(
         coder_visible_facts_metrics.get("visible_implementation_facts_chars", 0) or 0
     )
+    metrics["coder_available_imports_chars"] = len(available_imports_text)
+    metrics["coder_preservation_guidance_chars"] = len(preservation_guidance_text)
+    metrics["coder_prompt_section_sizes_final"] = final_section_sizes
 
     logger.info(
         "coder prompt priority assembly request_id=%s operation=%s soft_limit=%s effective_limit=%s final_chars=%s trim_steps=%s",
@@ -2290,7 +2785,8 @@ def build_repair_user_prompt(
         full_file_source, _ = _truncate_text(full_file_source, 350)
     full_file_source = _normalize_optional_value(full_file_source)
 
-    target_rendered = _render_target_symbol(target_symbol)
+    target_source_for_guidance = _render_target_symbol(target_symbol)
+    target_rendered = target_source_for_guidance
     if target_rendered:
         target_rendered, _ = _truncate_text(target_rendered, 420)
     target_rendered = _normalize_optional_value(target_rendered)
@@ -2315,7 +2811,12 @@ def build_repair_user_prompt(
     )
     repair_model_surfaces_text = _normalize_optional_value(repair_model_surfaces_text)
     required_repair_imports_text = _required_project_imports_for_codegen(project_context, change_request)
+    available_imports_text = _render_available_imports(project_context)
+    available_import_lines = _available_import_lines_from_project_context(project_context)
     full_file_import_context_text = _extract_import_context(str(project_context.get("full_file_source", "") or ""))
+    existing_import_context_text = "\n".join(
+        part for part in [available_import_lines, full_file_import_context_text] if part
+    )
     required_repair_import_changes = _required_repair_import_changes_text(
         required_repair_imports_text,
         request.error_context or {},
@@ -2325,7 +2826,7 @@ def build_repair_user_prompt(
     if not required_repair_import_changes:
         required_repair_import_changes = _required_import_changes_from_import_lines(
             required_repair_imports_text,
-            existing_import_context=full_file_import_context_text,
+            existing_import_context=existing_import_context_text,
         )
     required_repair_import_changes_block = _render_optional_block(
         "Required repair import_changes",
@@ -2344,6 +2845,15 @@ def build_repair_user_prompt(
             f"{contract_context_text}"
         )
         contract_metrics.update(repair_model_surfaces_metrics)
+    repair_preservation_guidance_text = _render_replace_symbol_preservation_guidance(
+        operation=str(requested_operation or ""),
+        change_request=change_request,
+        target_source=target_source_for_guidance,
+    )
+    repair_preservation_guidance_block = _render_optional_block(
+        "Сохраняемые элементы текущей реализации",
+        repair_preservation_guidance_text,
+    )
     contract_context_block = _render_optional_block(
         "Связанные production-контракты",
         _normalize_optional_value(contract_context_text),
@@ -2378,6 +2888,7 @@ def build_repair_user_prompt(
     repair_problem_block = _build_repair_problem_block(
         request.error_context or {},
     )
+    repair_scope_text = _repair_scope_from_error_context(request.error_context or {})
 # ***********************
     has_local_syntax_error = bool(syntax_error_block)
     has_previous_code = bool(previous_code)
@@ -2395,6 +2906,12 @@ def build_repair_user_prompt(
         "insert_after": previous_artifact.get("insert_after") or "null",
         "request": _compact_change_request_for_codegen(change_request, None) or "repair request",
         "repair_problem_block": repair_problem_block,
+        "repair_scope_block": _render_optional_block("Область repair", repair_scope_text),
+        "preservation_guidance_block": repair_preservation_guidance_block,
+        "available_imports_block": _render_optional_block(
+            "Доступные imports и имена целевого файла",
+            available_imports_text,
+        ),
         "required_repair_import_changes_block": required_repair_import_changes_block,
         "syntax_error_block": syntax_error_block,
         "previous_code_block": _render_optional_block(
@@ -2495,6 +3012,87 @@ def _extract_import_context(full_file_source: str) -> str:
     return "\n".join(imports)
 
 
+
+
+def _available_import_lines_from_project_context(project_context: dict[str, Any]) -> str:
+    items = project_context.get("available_imports") or []
+    lines: list[str] = []
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            source = str(item.get("source") or "").strip()
+            if not source:
+                kind = str(item.get("kind") or "").strip()
+                module = str(item.get("module") or "").strip()
+                imported = str(item.get("imported") or "").strip()
+                asname = str(item.get("asname") or "").strip()
+                if kind == "from_import" and module and imported:
+                    source = f"from {module} import {imported}" + (f" as {asname}" if asname else "")
+                elif kind == "import" and module:
+                    source = f"import {module}" + (f" as {asname}" if asname else "")
+            if source and source not in lines:
+                lines.append(source)
+    if lines:
+        return "\n".join(lines)
+    return _extract_import_context(str(project_context.get("full_file_source", "") or ""))
+
+
+def _render_available_imports(project_context: dict[str, Any], *, max_items: int = 40) -> str:
+    items = project_context.get("available_imports") or []
+    if not isinstance(items, list) or not items:
+        import_lines = _extract_import_context(str(project_context.get("full_file_source", "") or ""))
+        if not import_lines:
+            return ""
+        return "\n".join(f"- {line}" for line in import_lines.splitlines()[:max_items])
+
+    rendered: list[str] = []
+    for item in items[:max_items]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        source = str(item.get("source") or "").strip()
+        kind = str(item.get("kind") or "").strip()
+        module = str(item.get("module") or "").strip()
+        imported = str(item.get("imported") or "").strip()
+        if not source:
+            if kind == "from_import" and module and imported:
+                source = f"from {module} import {imported}"
+            elif kind == "import" and module:
+                source = f"import {module}"
+        if name and source:
+            rendered.append(f"- {name}: {source}")
+        elif source:
+            rendered.append(f"- {source}")
+    return "\n".join(rendered)
+
+
+def _repair_scope_from_error_context(error_context: dict[str, Any]) -> str:
+    summary = (error_context or {}).get("verification_summary") or {}
+    codes: list[str] = []
+    for block in summary.get("failed_blocks") or []:
+        for issue in block.get("issues") or []:
+            code = str(issue.get("code") or "").strip()
+            if code:
+                codes.append(code)
+    if not codes:
+        return ""
+    import_only_codes = {
+        "unknown_runtime_name",
+        "unknown_annotation_name",
+        "unresolved_import_change_module",
+        "unresolved_import_change_name",
+        "unused_import_change",
+        "duplicated_import_change_with_local_import",
+    }
+    if all(code in import_only_codes for code in codes):
+        return (
+            "только imports\n"
+            "Исправь import_changes, import-строки и минимально связанные обращения к импортируемому имени. "
+            "Не переписывай остальное тело symbol."
+        )
+    return "code и imports"
+
 def _infer_project_symbols(target_source: str) -> list[str]:
     candidates = re.findall(r"\b([A-Z][A-Za-z0-9_]*)\b", target_source)
     excluded = {"True", "False", "None", "JSON", "Python"}
@@ -2587,6 +3185,8 @@ def _resolve_test_target_symbol(
 def _build_test_reference_context_block(
     reference_context: dict[str, Any],
     runtime_config: RuntimeConfig | None,
+    *,
+    strip_source_docstrings: bool = True,
 ) -> tuple[str, dict[str, Any]]:
     max_chars = int(runtime_config.test_prompt_reference_chars or 0) if runtime_config else 420
     max_items = runtime_config.prompt_assembly.test_reference_max_items if runtime_config else 1
@@ -2596,6 +3196,7 @@ def _build_test_reference_context_block(
         reference_context or {},
         max_items=max_items,
         per_item_chars=max_chars,
+        strip_source_docstrings=strip_source_docstrings,
     )
     reference_text = _normalize_optional_value(reference_text)
     if not reference_text:
@@ -2800,10 +3401,169 @@ def _render_test_constructor_guidance(
     return "\n".join(f"- {line}" for line in lines)
 
 
+def _call_to_text(node: ast.AST) -> str:
+    try:
+        return ast.unparse(node)
+    except Exception:
+        return ""
+
+
+def _dedupe_preserve_order(values: list[str], *, limit: int = 8) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _find_function_source_by_name(source: str, name: str) -> str:
+    try:
+        tree = ast.parse(textwrap.dedent(source or ""))
+    except SyntaxError:
+        return ""
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            try:
+                return ast.get_source_segment(textwrap.dedent(source or ""), node) or ast.unparse(node)
+            except Exception:
+                return ""
+    return ""
+
+
+def _extract_self_helper_calls(source: str) -> list[tuple[str, list[str]]]:
+    calls: list[tuple[str, list[str]]] = []
+    try:
+        tree = ast.parse(textwrap.dedent(source or ""))
+    except SyntaxError:
+        return calls
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "self"):
+            continue
+        args = [_call_to_text(arg) for arg in node.args]
+        args = [item for item in args if item]
+        calls.append((func.attr, args))
+    return calls
+
+
+def _extract_attr_accesses_for_names(source: str, names: list[str]) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {name: [] for name in names if name}
+    if not result:
+        return result
+    try:
+        tree = ast.parse(textwrap.dedent(source or ""))
+    except SyntaxError:
+        return result
+
+    def root_name(node: ast.AST) -> str:
+        current = node
+        while isinstance(current, ast.Attribute):
+            current = current.value
+        return current.id if isinstance(current, ast.Name) else ""
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute):
+            continue
+        root = root_name(node)
+        if root not in result:
+            continue
+        text = _call_to_text(node)
+        if text and text not in result[root]:
+            result[root].append(text)
+    return {key: values[:8] for key, values in result.items() if values}
+
+
+def _extract_return_expressions(source: str) -> list[str]:
+    returns: list[str] = []
+    try:
+        tree = ast.parse(textwrap.dedent(source or ""))
+    except SyntaxError:
+        return returns
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Return) and node.value is not None:
+            text = _call_to_text(node.value)
+            if text:
+                returns.append(text)
+    return _dedupe_preserve_order(returns, limit=5)
+
+
+def _extract_explicit_output_dict_keys(source: str) -> list[str]:
+    keys: list[str] = []
+    try:
+        tree = ast.parse(textwrap.dedent(source or ""))
+    except SyntaxError:
+        return keys
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        for key in node.keys:
+            if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                keys.append(key.value)
+    return _dedupe_preserve_order(keys, limit=20)
+
+
+def _render_test_observable_contract_guidance(
+    target_source: str,
+    *,
+    full_file_source: str = "",
+    contract_context_text: str = "",
+) -> str:
+    lines: list[str] = []
+    returns = _extract_return_expressions(target_source)
+    if returns:
+        lines.append(
+            "Проверяемый код возвращает значение, вычисленное выражением: "
+            + "; ".join(returns)
+            + ". В тесте сохрани результат вызова в переменную, если дальше нужно проверить созданные данные, сохраненное состояние или последующее чтение. "
+              "Не сравнивай результат с заранее записанным примером из документации и не собирай такое же значение вручную из даты, имени, темы, идентификатора или других частей."
+        )
+
+    keys = _extract_explicit_output_dict_keys(target_source)
+    if keys:
+        lines.append(
+            "Target-код явно формирует структурированные данные с ключами: "
+            + ", ".join(keys)
+            + ". Если тест проверяет сохраненные/возвращенные структурированные данные, проверяй именно эти ключи и значения, не добавляя и не пропуская ключи по догадке."
+        )
+
+    helper_lines: list[str] = []
+    helper_source_context = "\n\n".join(
+        part for part in [full_file_source, contract_context_text] if str(part or "").strip()
+    )
+    for helper_name, args in _extract_self_helper_calls(target_source):
+        helper_source = _find_function_source_by_name(helper_source_context, helper_name)
+        if not helper_source:
+            continue
+        accesses = _extract_attr_accesses_for_names(helper_source, args)
+        if not accesses:
+            continue
+        for arg, attrs in accesses.items():
+            helper_lines.append(
+                f"self.{helper_name}({', '.join(args)}) читает {', '.join(attrs)}. "
+                f"Если тест использует реальный helper-вызов, подготовь {arg} так, чтобы эти поля/методы были валидны; не передавай None или несовместимое значение для читаемых полей."
+            )
+    for item in _dedupe_preserve_order(helper_lines, limit=6):
+        lines.append(item)
+
+    if not lines:
+        return ""
+    return "\n".join(f"- {line}" for line in lines)
+
+
 def _render_test_behavior_guidance(
     target_source: str,
     *,
     target_file: str = "",
+    full_file_source: str = "",
+    contract_context_text: str = "",
 ) -> str:
     source = str(target_source or "")
     if not source.strip():
@@ -2833,6 +3593,7 @@ def _render_test_behavior_guidance(
         "range",
         "isinstance",
         "super",
+        "open",
     }
     for name in re.findall(r"(?<![\w.])([a-z_][A-Za-z0-9_]*)\s*\(", source):
         if name in excluded:
@@ -2851,7 +3612,9 @@ def _render_test_behavior_guidance(
         helpers = ", ".join(method_names)
         lines.append(
             f"Target-код вызывает методы того же экземпляра через self: {helpers}. "
-            "Если тесту нужно контролировать такой helper, подмени именно видимый instance method "
+            "Если пользовательский запрос требует сохранить существующий путь выполнения или структуру работы метода, "
+            "не подменяй эти helper-вызовы так, чтобы скрыть неверный аргумент, порядок вызовов или изменение формата данных. "
+            "В остальных случаях, когда тесту нужно контролировать такой helper, подмени именно видимый instance method "
             "на объекте тестируемого класса. Данные, возвращаемые этой подменой, являются достаточной "
             "подготовкой для вызова target-метода; не создавай скрытые атрибуты состояния вроде `_items`, "
             "`_notes`, `_storage`, `_records`, если они не видны в class source."
@@ -2865,19 +3628,60 @@ def _render_test_behavior_guidance(
             + (f" `{module_name}.<helper>`" if module_name else "")
             + ", а не исходный модуль helper-а, потому что target-код может использовать direct from-import."
         )
+    observable_guidance = _render_test_observable_contract_guidance(
+        target_source,
+        full_file_source=full_file_source,
+        contract_context_text=contract_context_text,
+    )
+    if observable_guidance:
+        lines.append(observable_guidance)
     if not lines:
         return ""
     return "\n".join(f"- {line}" for line in lines)
+
+def _clean_test_plan_avoid_for_prompt(avoid: Any) -> list[str]:
+    """Remove avoid items that conflict with generic generated-test rules.
+
+    The test planner can occasionally place useful built-in test resources into
+    `avoid`. Passing those contradictions to the final test generator makes the
+    prompt unstable: the generator sees both "use a minimal real scenario" and
+    "avoid the resource needed for that scenario". This cleanup does not invent
+    new requirements; it only removes generic pytest resources that are allowed
+    elsewhere in the prompt.
+    """
+    if not isinstance(avoid, list):
+        return []
+
+    removable_markers = (
+        "tmp_path",
+        "pytest fixture",
+        "pytest fixtures",
+        "встроенные pytest fixtures",
+    )
+    cleaned: list[str] = []
+    for item in avoid:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        normalized = text.lower()
+        if any(marker in normalized for marker in removable_markers):
+            continue
+        cleaned.append(text)
+    return cleaned
+
 
 def _select_test_plan_fields_for_prompt(test_plan: dict[str, Any], fields: list[str]) -> dict[str, Any]:
     if not isinstance(test_plan, dict) or not test_plan:
         return {}
     if not fields:
-        return dict(test_plan)
-    selected: dict[str, Any] = {}
-    for field in fields:
-        if field in test_plan:
-            selected[field] = test_plan[field]
+        selected = dict(test_plan)
+    else:
+        selected = {}
+        for field in fields:
+            if field in test_plan:
+                selected[field] = test_plan[field]
+    if "avoid" in selected:
+        selected["avoid"] = _clean_test_plan_avoid_for_prompt(selected.get("avoid"))
     return selected
 
 def _build_test_prompt_values(
@@ -2905,7 +3709,7 @@ def _build_test_prompt_values(
     test_behavior_guidance_text: str = "",
     constructor_guidance_text: str = "",
 ) -> dict[str, str]:
-    target_block = _render_optional_block("Сгенерированный target-код", target_source)
+    target_block = _render_optional_block("Исполняемый код проверяемого метода без документации", target_source)
     example_block = _render_optional_block("Пример теста", example_text)
     related_tests_block = _render_optional_block("Связанные тесты проекта", related_tests_text)
     import_context_block = _render_optional_block("Импорты из целевого файла", import_context_text)
@@ -2914,7 +3718,7 @@ def _build_test_prompt_values(
         inferred_symbols_text,
     )
     full_file_source_block = _render_optional_block(
-        "Справочный контекст целевого файла до изменения",
+        "Справочный исполняемый контекст целевого файла до изменения без документации",
         full_file_source_text,
     )
     test_plan_block = _render_optional_block(
@@ -2983,6 +3787,7 @@ def _log_test_prompt_state(
     related_tests_text: str,
     import_context_text: str,
     inferred_symbols_text: str,
+    full_file_source_text: str = "",
     compact_request_text: str,
     effective_target_symbol: str,
     anchor_symbol: str | None,
@@ -2992,8 +3797,9 @@ def _log_test_prompt_state(
 ) -> None:
     logger.info(
         "Test prompt state stage=%s operation=%s prompt_chars=%s available_user_chars=%s "
-        "target_chars=%s request_chars=%s example_chars=%s related_tests_chars=%s "
-        "has_related_tests=%s import_context_chars=%s inferred_symbols_chars=%s "
+        "target_chars=%s request_chars=%s full_file_chars=%s has_full_file=%s "
+        "example_chars=%s related_tests_chars=%s has_related_tests=%s "
+        "import_context_chars=%s inferred_symbols_chars=%s "
         "reference_chars=%s has_reference=%s contract_context_chars=%s has_contract_context=%s contract_attribute_requirements_chars=%s has_contract_attribute_requirements=%s effective_target_symbol=%s anchor_symbol=%s",
         stage,
         requested_operation,
@@ -3001,6 +3807,8 @@ def _log_test_prompt_state(
         available_user_chars,
         len(target_source or ""),
         len(compact_request_text or ""),
+        len(full_file_source_text or ""),
+        bool(str(full_file_source_text or "").strip()),
         len(example_text or ""),
         len(related_tests_text or ""),
         bool(str(related_tests_text or "").strip()),
@@ -3071,6 +3879,7 @@ def build_test_generator_user_prompt(
     else:
         target_source = str(target_symbol.get("source", "") or "").strip()
         target_source_origin = "project_context.target_symbol"
+    target_executable_source, target_docstrings_removed = _strip_docstrings_from_python_source(target_source)
 
     insert_scope = str(
         artifact_payload.get("insert_scope")
@@ -3082,7 +3891,7 @@ def build_test_generator_user_prompt(
         or request.target.get("expected_new_symbol_kind")
         or ""
     ).strip()
-    stripped_target_source = target_source.strip()
+    stripped_target_source = target_executable_source.strip()
     if insert_scope == "class_body" or expected_new_symbol_kind == "method":
         effective_target_kind = "method"
     elif stripped_target_source.startswith("class ") or "\nclass " in stripped_target_source:
@@ -3100,19 +3909,21 @@ def build_test_generator_user_prompt(
     # disappear just because the visible file excerpt no longer reaches the
     # class body.
     full_file_source_for_guidance = str(pc.get("full_file_source", "") or "").strip()
-    full_file_source_text = full_file_source_for_guidance
+    full_file_source_text, full_file_docstrings_removed = _strip_docstrings_from_python_source(full_file_source_for_guidance)
     source_priority_text = ""
     if target_source_origin == "generated_code_artifact":
         source_priority_text = (
-            "Главный источник истины для теста — сгенерированный target-код. "
-            "Справочный контекст целевого файла до изменения используй только для импортов, стиля и окружающего кода. "
-            "Если справочный контекст противоречит сгенерированному target-коду по полям, аргументам конструктора, методам или ключам словаря, используй сгенерированный target-код."
+            "Главный источник истины для теста — исполняемый код проверяемого метода без документации. "
+            "Справочный контекст целевого файла и связанных методов используй только для импортов, сигнатур, стиля и окружающего кода. "
+            "Документация, комментарии и примеры нужны только для общего понимания. "
+            "Если пример из справочного контекста отличается от исполняемого кода, используй исполняемый код."
         )
 
     related_tests_text, related_test_metrics = _render_related_tests(
         pc,
         max_items=1,
         per_item_chars=500,
+        strip_source_docstrings=True,
     )
 
     has_related_tests = bool(str(related_tests_text or "").strip()) and related_tests_text != "none"
@@ -3129,6 +3940,8 @@ def build_test_generator_user_prompt(
         pc,
         max_items=runtime_config.test_prompt_contract_symbols,
         per_item_chars=runtime_config.test_prompt_contract_symbol_chars,
+        include_docstrings=False,
+        strip_source_docstrings=True,
     )
     model_surfaces_text, model_surfaces_metrics = _render_model_surfaces(
         pc,
@@ -3149,7 +3962,7 @@ def build_test_generator_user_prompt(
     )
 
     import_context_text = _extract_import_context(full_file_source_text)
-    inferred_symbols = _infer_project_symbols(target_source)
+    inferred_symbols = _infer_project_symbols(target_executable_source)
     inferred_symbols_text = "\n".join(f"- {name}" for name in inferred_symbols)
 
     requested_operation = (
@@ -3225,7 +4038,7 @@ def build_test_generator_user_prompt(
             request=request,
             generated_test_file=generated_test_file,
             compact_request_text=compact_request_text,
-            target_source=target_source,
+            target_source=target_executable_source,
             example_text=example_text,
             related_tests_text=related_tests_text,
             import_context_text=import_context_text,
@@ -3243,8 +4056,10 @@ def build_test_generator_user_prompt(
             required_imports_text=required_imports_text,
             source_priority_text=source_priority_text,
             test_behavior_guidance_text=_render_test_behavior_guidance(
-                target_source,
+                target_executable_source,
                 target_file=str(request.target.get("file_path", "") or ""),
+                full_file_source=full_file_source_for_guidance,
+                contract_context_text=contract_context_text,
             ),
             constructor_guidance_text=_render_test_constructor_guidance(
                 full_file_source=full_file_source_for_guidance,
@@ -3267,11 +4082,12 @@ def build_test_generator_user_prompt(
             requested_operation=requested_operation,
             available_user_chars=available_user_chars,
             prompt_len=len(prompt_value),
-            target_source=target_source,
+            target_source=target_executable_source,
             example_text=example_text,
             related_tests_text=related_tests_text,
             import_context_text=import_context_text,
             inferred_symbols_text=inferred_symbols_text,
+            full_file_source_text=full_file_source_text,
             compact_request_text=compact_request_text,
             effective_target_symbol=effective_target_symbol,
             anchor_symbol=anchor_symbol,
@@ -3290,6 +4106,11 @@ def build_test_generator_user_prompt(
     prompt = _render_prompt()
     before_trim = len(prompt)
     _log("initial", prompt)
+    # В тестогенерации пользовательский запрос, target-код, import context и
+    # contract context являются core-контекстом. Их нельзя выбрасывать только
+    # ради формального попадания в старый размер prompt-а; лучше явно
+    # залогировать overflow и отправить best-effort prompt.
+    allow_core_context_removal = False
 
     if len(prompt) > available_user_chars and example_text:
         example_text = ""
@@ -3303,7 +4124,7 @@ def build_test_generator_user_prompt(
         prompt = _render_prompt()
         _log("after_remove_inferred_symbols", prompt)
 
-    if len(prompt) > available_user_chars and compact_request_text:
+    if len(prompt) > available_user_chars and compact_request_text and allow_core_context_removal:
         compact_request_text = ""
         _record("removed compact_request_text on size limit")
         prompt = _render_prompt()
@@ -3317,7 +4138,7 @@ def build_test_generator_user_prompt(
 
     # Contract attribute requirements are more important than generic contract source,
     # because they directly constrain generated test data/fakes.
-    if len(prompt) > available_user_chars and contract_context_block:
+    if len(prompt) > available_user_chars and contract_context_block and allow_core_context_removal:
         contract_context_block = ""
         _record("removed contract_context_block on size limit")
         prompt = _render_prompt()
@@ -3341,7 +4162,7 @@ def build_test_generator_user_prompt(
         prompt = _render_prompt()
         _log("after_truncate_full_file_once", prompt)
 
-    if len(prompt) > available_user_chars and target_source:
+    if len(prompt) > available_user_chars and target_source and allow_core_context_removal:
         target_source, _ = _truncate_text(
             target_source,
             runtime_config.test_prompt_target_truncate_chars,
@@ -3352,7 +4173,7 @@ def build_test_generator_user_prompt(
         prompt = _render_prompt()
         _log("after_truncate_target", prompt)
 
-    if len(prompt) > available_user_chars and import_context_text:
+    if len(prompt) > available_user_chars and import_context_text and allow_core_context_removal:
         import_context_text = ""
         _record("removed import_context on size limit")
         prompt = _render_prompt()
@@ -3369,13 +4190,13 @@ def build_test_generator_user_prompt(
         prompt = _render_prompt()
         _log("after_remove_reference_context_hard", prompt)
 
-    if not _fits_with_soft_overflow(prompt) and contract_context_block:
+    if not _fits_with_soft_overflow(prompt) and contract_context_block and allow_core_context_removal:
         contract_context_block = ""
         _record("removed contract_context_block on hard size overflow")
         prompt = _render_prompt()
         _log("after_remove_contract_context_hard", prompt)
 
-    if not _fits_with_soft_overflow(prompt) and contract_attribute_requirements_block:
+    if not _fits_with_soft_overflow(prompt) and contract_attribute_requirements_block and allow_core_context_removal:
         contract_attribute_requirements_block = ""
         _record("removed contract_attribute_requirements_block on hard size overflow")
         prompt = _render_prompt()
@@ -3393,7 +4214,7 @@ def build_test_generator_user_prompt(
         prompt = _render_prompt()
         _log("after_remove_related_tests", prompt)
 
-    if not _fits_with_soft_overflow(prompt) and import_context_text:
+    if not _fits_with_soft_overflow(prompt) and import_context_text and allow_core_context_removal:
         import_context_text = ""
         _record("removed import_context on hard size overflow")
         prompt = _render_prompt()
@@ -3403,6 +4224,26 @@ def build_test_generator_user_prompt(
         logger.warning(
             "test prompt degraded: both full_file_source and related_tests were removed; "
             "generation will rely mostly on target code"
+        )
+    if len(prompt) > available_user_chars + soft_overflow_chars:
+        logger.warning(
+            "test prompt remains over limit but core context was preserved operation=%s prompt_chars=%s available_user_chars=%s soft_overflow_chars=%s section_sizes=%s",
+            requested_operation,
+            len(prompt),
+            available_user_chars,
+            soft_overflow_chars,
+            {
+                "target": len(target_source),
+                "request": len(compact_request_text),
+                "full_file": len(full_file_source_text),
+                "related_tests": len(related_tests_text or ""),
+                "reference": len(reference_context_block or ""),
+                "contract_context": len(contract_context_block or ""),
+                "contract_attribute_requirements": len(contract_attribute_requirements_block or ""),
+                "import_context": len(import_context_text),
+                "inferred_symbols": len(inferred_symbols_text),
+                "example": len(example_text),
+            },
         )
 
     logger.info(

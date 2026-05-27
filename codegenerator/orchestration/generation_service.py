@@ -1114,7 +1114,7 @@ def repair(request: RepairRequest, config_path: str) -> GenerationResult:
 
 
 
-_REVIEW_LIST_FIELDS = {'reasons', 'production_risks', 'test_issues'}
+_REVIEW_LIST_FIELDS = {'reasons', 'production_risks', 'test_issues', 'next_steps'}
 _REVIEW_ALLOWED_VERDICTS = {
     'production_likely_ok_test_likely_bad',
     'production_likely_bad_test_valid',
@@ -1162,6 +1162,8 @@ def _normalize_generated_test_review(review: Any) -> dict[str, Any]:
             'reasons': ['Модель вернула review не в объектном JSON-формате.'],
             'production_risks': [],
             'test_issues': [],
+            'recommendation_summary': 'Review недоступен: модель вернула не объектный JSON.',
+            'next_steps': ['Повторить review или проверить production/test вручную.'],
         }
 
     normalized = dict(review)
@@ -1173,10 +1175,25 @@ def _normalize_generated_test_review(review: Any) -> dict[str, Any]:
         verdict = 'both_uncertain'
     normalized['verdict'] = verdict
 
-    try:
-        confidence = float(normalized.get('confidence') or 0.0)
-    except Exception:
-        confidence = 0.0
+    raw_confidence = normalized.get('confidence')
+    confidence_map = {
+        'low': 0.3,
+        'medium': 0.6,
+        'high': 0.9,
+        'низкая': 0.3,
+        'средняя': 0.6,
+        'высокая': 0.9,
+    }
+    if isinstance(raw_confidence, str):
+        confidence_key = raw_confidence.strip().lower()
+        confidence = confidence_map.get(confidence_key)
+    else:
+        confidence = None
+    if confidence is None:
+        try:
+            confidence = float(raw_confidence or 0.0)
+        except Exception:
+            confidence = 0.0
     normalized['confidence'] = max(0.0, min(1.0, confidence))
 
     keep = str(normalized.get('should_keep_production_code') or '').strip()
@@ -1218,8 +1235,26 @@ def _normalize_generated_test_review(review: Any) -> dict[str, Any]:
 
     normalized['should_keep_production_code'] = keep
     normalized['recommended_action'] = action
-    for field in ('production_code_quality', 'generated_test_quality'):
+    for field in ('production_code_quality', 'generated_test_quality', 'recommendation_summary'):
         normalized[field] = str(normalized.get(field) or '')
+    if not normalized.get('recommendation_summary'):
+        if action == 'keep_production_code_exclude_test':
+            normalized['recommendation_summary'] = 'Production-код можно оставить для ручного merge review; generated test лучше исключить или перегенерировать.'
+        elif action == 'reject_production_code':
+            normalized['recommendation_summary'] = 'Production-код лучше отклонить: review нашел риск в основном коде.'
+        elif action == 'rerun_test_generation':
+            normalized['recommendation_summary'] = 'Production-код требует ручной проверки; generated test лучше перегенерировать.'
+        else:
+            normalized['recommendation_summary'] = 'Требуется ручная проверка production-кода и generated test.'
+    if not normalized.get('next_steps'):
+        if action == 'keep_production_code_exclude_test':
+            normalized['next_steps'] = ['Оставить production-код на ручной merge review.', 'Исключить текущий generated test.', 'Перегенерировать тест с учетом test_issues.']
+        elif action == 'reject_production_code':
+            normalized['next_steps'] = ['Отклонить production-код.', 'Исправить production generation или repair prompt.', 'Повторить запуск.']
+        elif action == 'rerun_test_generation':
+            normalized['next_steps'] = ['Оставить production-код только после ручной проверки.', 'Перегенерировать generated test.', 'Проверить новый тест по verification context.']
+        else:
+            normalized['next_steps'] = ['Проверить production diff вручную.', 'Проверить generated test вручную или перегенерировать его.']
     return normalized
 
 
