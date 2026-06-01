@@ -4,6 +4,7 @@ import ast
 import json
 import re
 import textwrap
+from pathlib import Path
 from typing import Any
 import logging
 
@@ -1775,6 +1776,9 @@ def build_test_planner_user_prompt(
                 runtime_config.prompt_assembly.test_planner_inferred_symbols_chars,
             )
 
+    lightweight_self_attrs = _simple_self_attributes_for_test_guidance(target_executable_source)
+    lightweight_no_self = _method_does_not_use_self_for_test_guidance(target_executable_source)
+
     source_priority_text = ""
     if target_source_origin == "generated_code_artifact":
         source_priority_text = (
@@ -1810,6 +1814,7 @@ def build_test_planner_user_prompt(
                 target_file=str(request.target.get("file_path", "") or ""),
                 full_file_source=full_file_source_for_guidance,
                 contract_context_text=contract_context_text,
+                use_static_entrypoint_strategy=_use_static_entrypoint_test_strategy(target_executable_source, request),
             ),
         ),
         "constructor_guidance_block": _render_optional_block(
@@ -1820,6 +1825,8 @@ def build_test_planner_user_prompt(
                 parent_qualname=str(request.target.get("parent_qualname") or ""),
                 insert_scope=str(request.target.get("insert_scope") or ""),
                 expected_new_symbol_kind=str(request.target.get("expected_new_symbol_kind") or ""),
+                lightweight_self_attrs=lightweight_self_attrs,
+                lightweight_no_self=lightweight_no_self,
             ),
         ),
         "anchor_symbol": anchor_symbol or "null",
@@ -3317,6 +3324,391 @@ def _class_init_contract_from_source(source: str, class_name: str) -> dict[str, 
     }
 
 
+def _attach_ast_parents(tree: ast.AST) -> ast.AST:
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            setattr(child, "parent", parent)
+    return tree
+
+
+
+
+def _method_does_not_use_self_for_test_guidance(source: str) -> bool:
+    """Return True when a class method body does not read or write self.
+
+    This is a general test-generation hint: if the method does not use object
+    state at all, a test does not need to construct the real parent instance.
+    """
+    try:
+        tree = ast.parse(textwrap.dedent(str(source or "")))
+    except SyntaxError:
+        return False
+
+    functions = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    if len(functions) != 1:
+        return False
+
+    function = functions[0]
+    args = getattr(function.args, "args", [])
+    if not args or getattr(args[0], "arg", "") != "self":
+        return False
+
+    for node in ast.walk(function):
+        if isinstance(node, ast.Name) and node.id == "self":
+            return False
+        if isinstance(node, ast.Attribute):
+            value = node.value
+            while isinstance(value, ast.Attribute):
+                value = value.value
+            if isinstance(value, ast.Name) and value.id == "self":
+                return False
+    return True
+
+
+
+def _module_entrypoint_guard_for_test_guidance(source: str) -> bool:
+    """Return True when generated code contains a direct module-run guard."""
+    raw_source = str(source or "")
+    if not raw_source.strip():
+        return False
+    try:
+        tree = ast.parse(textwrap.dedent(raw_source))
+    except SyntaxError:
+        return bool(re.search(r'if\s+__name__\s*==\s*[\"\']__main__[\"\']', raw_source))
+
+    def is_name_main_compare(test: ast.AST) -> bool:
+        if not isinstance(test, ast.Compare):
+            return False
+        left = test.left
+        if not (isinstance(left, ast.Name) and left.id == "__name__"):
+            return False
+        if not any(isinstance(op, ast.Eq) for op in test.ops):
+            return False
+        return any(
+            isinstance(comparator, ast.Constant) and comparator.value == "__main__"
+            for comparator in test.comparators
+        )
+
+    return any(isinstance(node, ast.If) and is_name_main_compare(node.test) for node in ast.walk(tree))
+
+
+def _request_text_for_test_strategy(request: GenerationRequest) -> str:
+    change_request = request.change_request or {}
+    parts: list[str] = []
+    if isinstance(change_request, dict):
+        for key in ("title", "description"):
+            value = str(change_request.get(key) or "").strip()
+            if value:
+                parts.append(value)
+        for key in ("constraints", "notes"):
+            values = change_request.get(key) or []
+            if isinstance(values, str):
+                values = [values]
+            parts.extend(str(item).strip() for item in values if str(item).strip())
+    return "\n".join(parts).lower()
+
+
+def _looks_like_entrypoint_target(request: GenerationRequest) -> bool:
+    target = request.target or {}
+    file_name = Path(str(target.get("file_path") or "")).name.lower()
+    if file_name not in {"main.py", "app.py", "run.py", "__main__.py"}:
+        return False
+    if str(target.get("parent_qualname") or "").strip():
+        return False
+    if str(target.get("insert_scope") or "").strip() == "class_body":
+        return False
+    kind = str(target.get("expected_new_symbol_kind") or "").strip()
+    if kind and kind != "function":
+        return False
+    return True
+
+
+def _request_explicitly_targets_module_start(request: GenerationRequest) -> bool:
+    text = _request_text_for_test_strategy(request)
+    if not text:
+        return False
+    negative_patterns = (
+        "не менять точк",
+        "без изменения запуск",
+        "не изменять запуск",
+        "не менять запуск",
+    )
+    if any(pattern in text for pattern in negative_patterns):
+        return False
+
+    positive_patterns = (
+        "точк",
+        "при запуск",
+        "запуск файла",
+        "запуске файла",
+        "запустить приложение",
+        "запускать приложение",
+        "прямом выполн",
+        "выполнении файла",
+        "python main.py",
+        "__main__",
+    )
+    if not any(pattern in text for pattern in positive_patterns):
+        return False
+    runtime_specific_patterns = (
+        "аргумент команд",
+        "аргументы команд",
+        "argv",
+        "код возврата",
+        "exit code",
+        "обработк",
+        "ошиб",
+        "конфиг",
+        "параметр команд",
+        "cli",
+    )
+    return not any(pattern in text for pattern in runtime_specific_patterns)
+
+
+def _use_static_entrypoint_test_strategy(source: str, request: GenerationRequest) -> bool:
+    """Enable static entrypoint tests only for explicit module-start CRs.
+
+    A module can contain an ``if __name__ == "__main__"`` guard while the CR
+    is about another behavior of ``main``. In that case runtime or focused unit
+    tests should remain available.
+    """
+    return (
+        _module_entrypoint_guard_for_test_guidance(source)
+        and _looks_like_entrypoint_target(request)
+        and _request_explicitly_targets_module_start(request)
+    )
+
+def _self_attribute_chain(node: ast.AST) -> list[str] | None:
+    """Return attribute chain after ``self`` for an Attribute node.
+
+    ``self.editor.clear`` becomes ["editor", "clear"]. Non-``self`` chains
+    return None.
+    """
+    if not isinstance(node, ast.Attribute):
+        return None
+    attrs: list[str] = []
+    current: ast.AST = node
+    while isinstance(current, ast.Attribute):
+        attrs.append(current.attr)
+        current = current.value
+    if isinstance(current, ast.Name) and current.id == "self":
+        return list(reversed(attrs))
+    return None
+
+
+def _simple_self_attributes_for_test_guidance(source: str) -> list[str]:
+    """Return simple self attributes needed by a target method.
+
+    This is intentionally conservative. It is used only to add a test-generation
+    hint for method bodies that can be exercised with a lightweight fake self
+    object instead of a heavy parent constructor.
+
+    Direct reads/writes like ``self.note = None`` are simple. Calls to a small
+    allowlist of common no-heavy-dependency methods on a self-held value, such
+    as ``self.editor.clear()``, are also treated as simple because tests can
+    represent the held value with a tiny fake object. Direct calls on the parent
+    object itself, such as ``self.save_note()``, and unknown dependency calls,
+    such as ``self.service.execute()``, remain non-lightweight.
+    """
+    try:
+        tree = _attach_ast_parents(ast.parse(textwrap.dedent(str(source or ""))))
+    except SyntaxError:
+        return []
+
+    functions = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    if len(functions) != 1:
+        return []
+
+    function = functions[0]
+    args = getattr(function.args, "args", [])
+    if not args or getattr(args[0], "arg", "") != "self":
+        return []
+
+    simple_attrs: set[str] = set()
+    has_complex_self_access = False
+    # Small conservative set of value-object/widget methods that are easy to
+    # represent with a fake object in unit tests and do not imply the parent
+    # constructor must run. Do not include broad service/repository verbs here.
+    simple_attr_call_methods = {
+        "clear",
+        "text",
+        "setText",
+        "undo",
+        "redo",
+        "isModified",
+        "setModified",
+    }
+
+    for node in ast.walk(function):
+        if not isinstance(node, ast.Attribute):
+            continue
+
+        chain = _self_attribute_chain(node)
+        if not chain:
+            continue
+
+        parent = getattr(node, "parent", None)
+        if len(chain) == 1:
+            # ``self.helper()`` is a direct parent-method call and should not be
+            # treated like a simple self-held attribute.
+            if isinstance(parent, ast.Call) and parent.func is node:
+                has_complex_self_access = True
+                continue
+            simple_attrs.add(chain[0])
+            continue
+
+        if len(chain) == 2:
+            # Allow only calls like ``self.editor.clear()``. The inner
+            # ``self.editor`` node is already covered above; the outer
+            # ``self.editor.clear`` node is safe only when it is the called
+            # function and the method name is in the conservative allowlist.
+            if (
+                isinstance(parent, ast.Call)
+                and parent.func is node
+                and chain[1] in simple_attr_call_methods
+            ):
+                simple_attrs.add(chain[0])
+                continue
+            # For the inner node of an allowed call, e.g. ``self.editor`` in
+            # ``self.editor.clear()``, keep the receiver as a simple attr.
+            if isinstance(parent, ast.Attribute):
+                grandparent = getattr(parent, "parent", None)
+                parent_chain = _self_attribute_chain(parent)
+                if (
+                    parent_chain
+                    and len(parent_chain) == 2
+                    and isinstance(grandparent, ast.Call)
+                    and grandparent.func is parent
+                    and parent_chain[1] in simple_attr_call_methods
+                ):
+                    simple_attrs.add(chain[0])
+                    continue
+
+        has_complex_self_access = True
+
+    if has_complex_self_access:
+        return []
+    return sorted(simple_attrs)
+
+def _extract_self_attr_method_calls_for_test_guidance(source: str) -> dict[str, list[str]]:
+    """Return calls like ``self.storage.save(...)`` grouped by self attribute.
+
+    This is used only as a testing hint. It does not classify the target as
+    lightweight; it tells the test generator that self-held dependencies can be
+    represented by local fakes exposing only the methods actually called by the
+    target body.
+    """
+    try:
+        tree = ast.parse(textwrap.dedent(str(source or "")))
+    except SyntaxError:
+        return {}
+
+    calls: dict[str, list[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        chain = _self_attribute_chain(node.func)
+        if not chain or len(chain) != 2:
+            continue
+        attr_name, method_name = chain
+        if not attr_name or not method_name:
+            continue
+        methods = calls.setdefault(attr_name, [])
+        if method_name not in methods:
+            methods.append(method_name)
+    return calls
+
+
+
+def _has_guard_return_before_later_effects_for_test_guidance(source: str) -> bool:
+    """Return True when a function has a guard ``return`` before later effects.
+
+    This is intentionally conservative and is used only to add a prompt hint.
+    It does not try to prove full control-flow correctness. It recognizes the
+    common shape::
+
+        if invalid_input:
+            return
+        self.storage.save(...)
+        self.is_modified = False
+
+    For tests of the guard branch, assertions must not expect effects that are
+    located after the early return.
+    """
+    try:
+        tree = ast.parse(textwrap.dedent(str(source or "")))
+    except SyntaxError:
+        return False
+
+    functions = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    if len(functions) != 1:
+        return False
+
+    def stmt_has_return(stmt: ast.stmt) -> bool:
+        return any(isinstance(node, ast.Return) for node in ast.walk(stmt))
+
+    def stmt_has_effect(stmt: ast.stmt) -> bool:
+        for node in ast.walk(stmt):
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete)):
+                return True
+            if isinstance(node, ast.Call):
+                return True
+        return False
+
+    body = list(functions[0].body)
+    for index, stmt in enumerate(body):
+        if not isinstance(stmt, ast.If):
+            continue
+        if not stmt_has_return(stmt):
+            continue
+        if any(stmt_has_effect(later) for later in body[index + 1:]):
+            return True
+    return False
+
+
+def _runtime_clock_calls_for_test_guidance(source: str) -> list[str]:
+    """Return runtime date/time calls used by a target body.
+
+    This is used only to add test-generation guidance. The detector is
+    intentionally small: it covers common standard-library calls that produce
+    the current date or time during execution.
+    """
+    try:
+        tree = ast.parse(textwrap.dedent(str(source or "")))
+    except SyntaxError:
+        return []
+
+    def dotted_name(node: ast.AST) -> str:
+        parts: list[str] = []
+        current: ast.AST | None = node
+        while isinstance(current, ast.Attribute):
+            parts.append(current.attr)
+            current = current.value
+        if isinstance(current, ast.Name):
+            parts.append(current.id)
+        if not parts:
+            return ""
+        return ".".join(reversed(parts))
+
+    calls: list[str] = []
+    exact_names = {
+        "datetime.now",
+        "datetime.utcnow",
+        "datetime.datetime.now",
+        "datetime.datetime.utcnow",
+        "date.today",
+        "datetime.date.today",
+    }
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = dotted_name(node.func)
+        if name not in exact_names:
+            continue
+        if name not in calls:
+            calls.append(name)
+    return calls
+
 def _render_test_constructor_guidance(
     *,
     full_file_source: str,
@@ -3324,6 +3716,8 @@ def _render_test_constructor_guidance(
     parent_qualname: str,
     insert_scope: str,
     expected_new_symbol_kind: str,
+    lightweight_self_attrs: list[str] | None = None,
+    lightweight_no_self: bool = False,
 ) -> str:
     class_name = _parent_class_name_for_test_target(
         effective_target_symbol=effective_target_symbol,
@@ -3337,6 +3731,29 @@ def _render_test_constructor_guidance(
     contract = _class_init_contract_from_source(full_file_source, class_name)
     if not contract:
         return ""
+
+    lightweight_self_attrs = list(lightweight_self_attrs or [])
+    if lightweight_no_self:
+        return "\n".join(
+            f"- {line}"
+            for line in [
+                "Конструктор parent class видим, но для текущего target-кода не является рекомендуемым setup.",
+                "Target-код не использует self и не требует состояния реального экземпляра.",
+                "Не создавай настоящий экземпляр parent class только ради проверки этого метода; передай `None` или локальный fake/stub объект как self и вызови метод как unbound method через parent class.",
+                "Создавай настоящий экземпляр только если исходный запрос или сам target-код явно требуют реального конструктора, GUI-состояния или inherited runtime behavior.",
+            ]
+        )
+    if lightweight_self_attrs:
+        attrs = ", ".join(lightweight_self_attrs)
+        return "\n".join(
+            f"- {line}"
+            for line in [
+                "Конструктор parent class видим, но для текущего target-кода не является рекомендуемым setup.",
+                f"Target-код использует только простые self-атрибуты: {attrs}.",
+                "Не создавай настоящий экземпляр parent class только ради проверки этого метода; используй fake/stub объект или `types.SimpleNamespace` и вызови метод как unbound method через parent class.",
+                "Создавай настоящий экземпляр только если исходный запрос или сам target-код явно требуют реального конструктора, GUI-состояния или inherited runtime behavior.",
+            ]
+        )
 
     lines = [
         f"Видимый конструктор parent class для теста: {contract['signature']}.",
@@ -3564,6 +3981,7 @@ def _render_test_behavior_guidance(
     target_file: str = "",
     full_file_source: str = "",
     contract_context_text: str = "",
+    use_static_entrypoint_strategy: bool = False,
 ) -> str:
     source = str(target_source or "")
     if not source.strip():
@@ -3608,6 +4026,62 @@ def _render_test_behavior_guidance(
         module_name = file_path[:-3].replace("/", ".")
 
     lines = []
+    if use_static_entrypoint_strategy:
+        lines.append(
+            "Target-код содержит блок запуска модуля при прямом выполнении файла. "
+            "Не запускай настоящее приложение и долгий цикл выполнения только ради проверки этого блока. "
+            "Предпочитай безопасную статическую проверку исходного файла через стандартную библиотеку и проверь, что блок запуска вызывает нужную функцию. "
+            "Эта стратегия имеет приоритет над runtime-импортами и must_use_symbols, которые нужны только внутри настоящего запуска приложения."
+        )
+    if re.search(r"sys\.exit\s*\(.*\.exec_?\s*\(", source, flags=re.DOTALL):
+        lines.append(
+            "Target-код передает результат цикла выполнения приложения в `sys.exit`. "
+            "В тесте не запускай настоящий цикл выполнения и не завершай процесс. "
+            "Используй контролируемые fake/stub зависимости или `monkeypatch` для binding-ов target-модуля. "
+            "Задай явное возвращаемое значение fake/stub метода цикла выполнения и проверяй, что `sys.exit` получил именно это значение; "
+            "не ожидай `0` по умолчанию."
+        )
+    method_does_not_use_self = _method_does_not_use_self_for_test_guidance(source)
+    simple_self_attrs = _simple_self_attributes_for_test_guidance(source)
+    self_attr_method_calls = _extract_self_attr_method_calls_for_test_guidance(source)
+    if method_does_not_use_self:
+        lines.append(
+            "Target-код не использует self. Не создавай настоящий экземпляр parent class только ради проверки этого метода. "
+            "Передай `None` или локальный fake/stub объект как self и вызывай метод как unbound method через parent class."
+        )
+    elif simple_self_attrs:
+        attrs = ", ".join(simple_self_attrs)
+        lines.append(
+            f"Target-код читает или меняет только простые self-атрибуты: {attrs}. "
+            "Если реальный конструктор класса тяжелый, GUI-зависимый или не нужен для проверяемого требования, "
+            "не создавай настоящий экземпляр parent class. Используй локальный fake/stub объект или `types.SimpleNamespace` "
+            "с этими атрибутами и вызывай метод как unbound method через parent class."
+        )
+    if self_attr_method_calls:
+        call_parts = []
+        for attr_name, methods in sorted(self_attr_method_calls.items()):
+            call_parts.append(f"self.{attr_name}." + "/".join(methods))
+        lines.append(
+            "Target-код вызывает методы зависимостей или значений, хранящихся в self-атрибутах: "
+            + ", ".join(call_parts)
+            + ". Если тест не проверяет реальную реализацию этой зависимости, представь соответствующий self-атрибут локальным fake/stub объектом только с фактически вызываемыми методами. "
+              "Не создавай настоящий dependency/project object и не вызывай его неупомянутые методы только для подготовки или проверки состояния."
+        )
+    if _has_guard_return_before_later_effects_for_test_guidance(source):
+        lines.append(
+            "Проверяемый код содержит защитную ветку с ранним `return` перед последующими изменениями состояния или вызовами зависимостей. "
+            "Если тест проверяет такую ветку, не ожидай эффектов, которые в проверяемом коде находятся ниже этого `return`. "
+            "Для этой ветки проверяй безопасное завершение, отсутствие последующих побочных вызовов или сохранение прежнего состояния, если изменение состояния выполняется только после `return`."
+        )
+    runtime_clock_calls = _runtime_clock_calls_for_test_guidance(source)
+    if runtime_clock_calls:
+        calls = ", ".join(runtime_clock_calls)
+        lines.append(
+            "Проверяемый код получает текущее время во время выполнения: "
+            + calls
+            + ". Фиксированную дату или время можно использовать в ожидаемых значениях только при явной подмене того же источника времени, который вызывает проверяемый код. "
+              "Если источник времени не подменяется, зафиксируй время до вызова и после вызова, затем проверяй, что полученное значение находится в этом интервале."
+        )
     if method_names:
         helpers = ", ".join(method_names)
         lines.append(
@@ -3657,6 +4131,14 @@ def _clean_test_plan_avoid_for_prompt(avoid: Any) -> list[str]:
         "pytest fixture",
         "pytest fixtures",
         "встроенные pytest fixtures",
+        # Keep unavailable optional pytest plugins out of the final prompt.
+        # The global template already forbids plugin-specific patch/mock fixtures;
+        # repeating plugin names in the plan can prime the generator to use them.
+        "mocker",
+        "pytest-mock",
+        "pytest_mock",
+        "pytest mock",
+        "optional pytest plugin fixtures",
     )
     cleaned: list[str] = []
     for item in avoid:
@@ -3683,6 +4165,14 @@ def _select_test_plan_fields_for_prompt(test_plan: dict[str, Any], fields: list[
     if "avoid" in selected:
         selected["avoid"] = _clean_test_plan_avoid_for_prompt(selected.get("avoid"))
     return selected
+
+
+def _test_plan_fields_for_generator(configured_fields: Any, test_plan: dict[str, Any]) -> list[str]:
+    fields = [str(field) for field in (configured_fields or []) if str(field or "").strip()]
+    safe_avoid = _clean_test_plan_avoid_for_prompt((test_plan or {}).get("avoid"))
+    if safe_avoid and "avoid" not in fields:
+        fields.append("avoid")
+    return fields
 
 def _build_test_prompt_values(
     *,
@@ -3837,31 +4327,6 @@ def build_test_generator_user_prompt(
 ) -> tuple[str, dict[str, Any]]:
     pc = request.project_context or {}
     effective_test_plan = test_plan or request.test_plan or {}
-    prompt_test_plan = _select_test_plan_fields_for_prompt(
-        effective_test_plan,
-        list(runtime_config.prompt_assembly.test_generator_plan_fields or []),
-    )
-    test_plan_text = _pretty(prompt_test_plan) if prompt_test_plan else ""    
-    required_imports = _required_project_imports_from_symbols_for_tests(
-        request.project_context or {},
-        list((effective_test_plan or {}).get("must_use_symbols") or []),
-    )
-    request_required_imports_text = _required_project_imports_for_tests(
-        request.project_context or {},
-        request.change_request,
-    )
-    required_imports_text = "\n".join(
-        dict.fromkeys(
-            [
-                *[line for line in required_imports if str(line or "").strip()],
-                *[
-                    line
-                    for line in request_required_imports_text.splitlines()
-                    if str(line or "").strip()
-                ],
-            ]
-        )
-    )
     target_symbol = pc.get("target_symbol") or {}
     compact_request_text = _compact_change_request_for_codegen(
         request.change_request,
@@ -3880,7 +4345,56 @@ def build_test_generator_user_prompt(
         target_source = str(target_symbol.get("source", "") or "").strip()
         target_source_origin = "project_context.target_symbol"
     target_executable_source, target_docstrings_removed = _strip_docstrings_from_python_source(target_source)
+    uses_static_entrypoint_strategy = _use_static_entrypoint_test_strategy(target_executable_source, request)
 
+    prompt_plan_source = dict(effective_test_plan or {})
+    if uses_static_entrypoint_strategy:
+        # For module entrypoint guards the safest test is a static source/AST check.
+        # Runtime-only symbols used inside the entrypoint should not be rendered as
+        # mandatory imports or must-use objects because importing them may start
+        # optional dependencies or a heavy application stack.
+        prompt_plan_source["must_use_symbols"] = []
+        existing_intent = str(prompt_plan_source.get("test_intent") or "").strip()
+        if existing_intent:
+            prompt_plan_source["test_intent"] = (
+                existing_intent
+                + " Проверять блок запуска статически, без импорта и запуска настоящего приложения."
+            )
+        else:
+            prompt_plan_source["test_intent"] = (
+                "Проверить блок запуска модуля статически, без импорта и запуска настоящего приложения."
+            )
+    prompt_test_plan = _select_test_plan_fields_for_prompt(
+        prompt_plan_source,
+        _test_plan_fields_for_generator(
+            runtime_config.prompt_assembly.test_generator_plan_fields or [],
+            prompt_plan_source,
+        ),
+    )
+    test_plan_text = _pretty(prompt_test_plan) if prompt_test_plan else ""
+    if uses_static_entrypoint_strategy:
+        required_imports_text = ""
+    else:
+        required_imports = _required_project_imports_from_symbols_for_tests(
+            request.project_context or {},
+            list((effective_test_plan or {}).get("must_use_symbols") or []),
+        )
+        request_required_imports_text = _required_project_imports_for_tests(
+            request.project_context or {},
+            request.change_request,
+        )
+        required_imports_text = "\n".join(
+            dict.fromkeys(
+                [
+                    *[line for line in required_imports if str(line or "").strip()],
+                    *[
+                        line
+                        for line in request_required_imports_text.splitlines()
+                        if str(line or "").strip()
+                    ],
+                ]
+            )
+        )
     insert_scope = str(
         artifact_payload.get("insert_scope")
         or request.target.get("insert_scope")
@@ -3964,11 +4478,22 @@ def build_test_generator_user_prompt(
     import_context_text = _extract_import_context(full_file_source_text)
     inferred_symbols = _infer_project_symbols(target_executable_source)
     inferred_symbols_text = "\n".join(f"- {name}" for name in inferred_symbols)
+    if uses_static_entrypoint_strategy:
+        # Static entrypoint tests should not import the target module or render runtime-only
+        # GUI/application dependencies as required context. The target_file and generated
+        # code block are enough to check the module guard through source/AST inspection.
+        full_file_source_text = ""
+        import_context_text = ""
+        inferred_symbols_text = ""
+        contract_context_block = ""
+        model_surfaces_text = ""
 
     requested_operation = (
         str(request.target.get("operation", "") or "").strip()
         or "replace_symbol"
     )
+    lightweight_self_attrs = _simple_self_attributes_for_test_guidance(target_executable_source)
+    lightweight_no_self = _method_does_not_use_self_for_test_guidance(target_executable_source)
 
     trim_steps: list[str] = []
 
@@ -4060,6 +4585,7 @@ def build_test_generator_user_prompt(
                 target_file=str(request.target.get("file_path", "") or ""),
                 full_file_source=full_file_source_for_guidance,
                 contract_context_text=contract_context_text,
+                use_static_entrypoint_strategy=uses_static_entrypoint_strategy,
             ),
             constructor_guidance_text=_render_test_constructor_guidance(
                 full_file_source=full_file_source_for_guidance,
@@ -4067,6 +4593,8 @@ def build_test_generator_user_prompt(
                 parent_qualname=str(request.target.get("parent_qualname") or ""),
                 insert_scope=insert_scope,
                 expected_new_symbol_kind=expected_new_symbol_kind,
+                lightweight_self_attrs=lightweight_self_attrs,
+                lightweight_no_self=lightweight_no_self,
             ),
         )
         prompt_value = template_text.format(**values)

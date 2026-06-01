@@ -124,23 +124,25 @@ def _normalize_import_changes(value) -> list[dict]:
     if not isinstance(value, list):
         return []
     result: list[dict] = []
+    allowed_actions = {'add_import', 'add_from_import', 'remove_import', 'remove_from_import'}
     for item in value:
         if not isinstance(item, dict):
             continue
         action = str(item.get('action') or '').strip()
         module = str(item.get('module') or '').strip()
-        if action not in {'add_import', 'add_from_import'} or not module:
+        if action not in allowed_actions or not module:
             continue
         normalized = {'action': action, 'module': module}
-        if action == 'add_import':
-            alias = str(item.get('alias') or '').strip()
+        if action in {'add_import', 'remove_import'}:
+            alias = str(item.get('alias') or item.get('asname') or '').strip()
             if alias:
                 normalized['alias'] = alias
         else:
             names = [str(name).strip() for name in (item.get('names') or []) if str(name).strip()]
-            if not names:
+            if not names and action == 'add_from_import':
                 continue
-            normalized['names'] = names
+            if names:
+                normalized['names'] = names
         result.append(normalized)
     return result
 
