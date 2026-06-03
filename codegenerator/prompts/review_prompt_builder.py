@@ -71,6 +71,7 @@ class GeneratedTestFailureReviewPromptBuilder:
         visible_context = _extract_review_visible_context(project_context)
         values = {
             "change_request_block": _compact_json(request.get("change_request") or {}, limit=3200),
+            "planner_result_block": _compact_json(request.get("planner_result") or {}, limit=3200),
             "target_block": _compact_json(request.get("target") or {}, limit=1600),
             "old_target_source_block": _compact_text(old_target_source, limit=6000),
             "full_file_source_block": _compact_text(full_file_source, limit=16000),
@@ -88,6 +89,8 @@ class GeneratedTestFailureReviewPromptBuilder:
             "production_diff_chars": len(str(production_artifact.get("diff") or "")),
             "generated_test_chars": len(str(generated_test.get("source_code") or "")),
             "verification_context_chars": len(json.dumps(verification_context, ensure_ascii=False)),
+            "review_planner_result_chars": len(json.dumps(request.get("planner_result") or {}, ensure_ascii=False)),
+            "review_has_planner_result": bool(request.get("planner_result")),
             "review_old_target_source_chars": len(old_target_source),
             "review_full_file_source_chars": len(full_file_source),
             "review_visible_context_chars": len(json.dumps(visible_context, ensure_ascii=False)),

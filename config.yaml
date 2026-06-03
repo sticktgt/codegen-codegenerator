@@ -3,7 +3,7 @@ llm:
   ollama:
     base_url: "https://ollama.com" # "http://192.168.50.165:18081" #  
     api_key: "690c1905bf5142119e9eac6f0a6ee992.31gfL8NrBTR2PCsnuR90va_M"
-    timeout_sec: 420 # 600
+    timeout_sec: 300 # 600
     think: false
     temperature: 0.0
     num_ctx: 32768 # 4096 

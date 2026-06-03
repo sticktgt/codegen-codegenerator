@@ -59,6 +59,75 @@ def _render_target_symbol(target_symbol: dict[str, Any]) -> str:
     return _pretty({k: v for k, v in target_symbol.items() if k != "source"})
 
 
+def _extract_primary_docstring_from_python_source(source: str) -> str:
+    """Return the first module/class/function docstring from a source snippet.
+
+    The caller uses this as documentation context only. It must not drive
+    generated behavior when it conflicts with the change request or planner
+    requirements.
+    """
+    raw = str(source or "").strip()
+    if not raw:
+        return ""
+
+    candidates = [raw, textwrap.dedent(raw)]
+    for candidate in candidates:
+        try:
+            tree = ast.parse(candidate)
+        except SyntaxError:
+            continue
+        module_doc = ast.get_docstring(tree, clean=True)
+        if module_doc and len(tree.body) == 1 and not isinstance(
+            tree.body[0], (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ):
+            return module_doc.strip()
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                doc = ast.get_docstring(node, clean=True)
+                if doc:
+                    return doc.strip()
+        if module_doc:
+            return module_doc.strip()
+
+    # Best-effort fallback for incomplete indented snippets.
+    lines = textwrap.dedent(raw).splitlines()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith(("def ", "async def ", "class ")):
+            continue
+        for next_line in lines[index + 1:]:
+            candidate = next_line.strip()
+            if not candidate:
+                continue
+            quote = _docstring_quote_at_line_start(candidate)
+            if not quote:
+                return ""
+            try:
+                value = ast.literal_eval(candidate)
+            except (SyntaxError, ValueError):
+                return ""
+            return str(value).strip()
+    return ""
+
+
+def _render_docstring_update_guidance(docstring: str, *, max_chars: int = 1200) -> str:
+    doc = str(docstring or "").strip()
+    if not doc:
+        return ""
+    if len(doc) > max_chars:
+        doc = doc[:max_chars].rstrip() + "\n# ... truncated"
+    return (
+        "Старый docstring целевого symbol передан только как документационный контекст для обновления.\n"
+        "Не используй его как источник требований к поведению, если он конфликтует с пользовательским запросом, "
+        "explicit_requirements или preserve_literals.\n"
+        "В итоговом code docstring существующего symbol должен сохраниться или быть обновлен под новое поведение. "
+        "Если старый docstring противоречит новому поведению, сохрани полезную структуру документации и перепиши противоречивые строки. "
+        "Верни полный код symbol вместе с docstring; не возвращай только исполняемые строки тела. "
+        "Для метода или функции docstring должен быть первой инструкцией внутри тела symbol сразу после строки def/async def.\n\n"
+        f"Старый docstring:\n{doc}"
+    )
+
+
 def _render_related_tests(
     project_context: dict[str, Any],
     max_items: int,
@@ -390,24 +459,25 @@ def _render_reuse_existing_logic(project_context: dict[str, Any], max_chars: int
     contracts = [item for item in (reuse.get("contracts") or []) if isinstance(item, dict)]
     if mode == "none" or not contracts:
         return "none", {"reuse_existing_logic_contracts": 0, "reuse_existing_logic_chars": 0}
+
+    # Keep this block intentionally compact. Free-form analyzer reasons can contain
+    # speculative implementation details; those should not become requirements for
+    # generation. The prompt receives only the visible symbols that may be useful.
     lines = [
         f"Режим: {mode}",
         f"Уверенность: {reuse.get('confidence', 0)}",
+        "Это справочная подсказка, а не требование к новому поведению.",
+        "Переиспользуй только явно видимые symbols, если они действительно нужны для пользовательского запроса.",
+        "Не добавляй новое преобразование данных только из этой подсказки.",
+        "Видимые symbols для возможного переиспользования:",
     ]
-    reason = str(reuse.get("reason") or "").strip()
-    if reason:
-        lines.append(f"Причина: {reason}")
-    lines.append("Существующая логика, которую следует рассмотреть для переиспользования:")
     for item in contracts:
         qualname = str(item.get("qualname") or "").strip()
         if not qualname:
             continue
         role = str(item.get("role") or "").strip()
-        item_reason = str(item.get("reason") or "").strip()
         suffix = f" ({role})" if role else ""
         lines.append(f"- {qualname}{suffix}")
-        if item_reason:
-            lines.append(f"  Причина: {item_reason}")
     rendered = "\n".join(lines).strip() or "none"
     original_chars = 0 if rendered == "none" else len(rendered)
     if max_chars > 0 and rendered != "none" and len(rendered) > max_chars:
@@ -453,7 +523,7 @@ def _render_visible_implementation_facts(
         facts.append(same_class_methods_text)
 
     if reuse_existing_logic_text and reuse_existing_logic_text != "none":
-        facts.append("Подсказки по переиспользованию существующих методов проекта:")
+        facts.append("Справочные подсказки по возможному переиспользованию:")
         facts.append(reuse_existing_logic_text)
 
     if fields_by_type:
@@ -1166,6 +1236,9 @@ def _build_coder_prompt_metrics(
     before_trim: int,
     after_trim: int,
     trim_steps: list[str] | None = None,
+    target_docstrings_removed: bool = False,
+    full_file_docstrings_removed: bool = False,
+    contract_context_docstrings_removed: bool = False,
 ) -> dict[str, Any]:
     normalized_module_outline = _normalize_optional_value(module_outline_text)
     normalized_full_file = _normalize_optional_value(full_file_text)
@@ -1182,6 +1255,9 @@ def _build_coder_prompt_metrics(
         "coder_reference_chars": len(normalized_reference),
         "coder_related_test_chars": len(normalized_related_tests),
         "coder_contract_context_chars": len(normalized_contract_context),
+        "coder_target_docstrings_removed": target_docstrings_removed,
+        "coder_full_file_docstrings_removed": full_file_docstrings_removed,
+        "coder_contract_context_docstrings_removed": contract_context_docstrings_removed,
         "coder_trim_steps": list(trim_steps or []),
     }
 
@@ -1561,15 +1637,15 @@ def _compact_change_request_for_codegen(
         planner_constraints = [str(item) for item in (filtered_planner.get("constraints") or []) if item]
 
         if explicit_requirements:
-            lines.append("Explicit user requirements from planner:")
+            lines.append("Требования из planner_json (вспомогательные, сверяй с исходным запросом):")
             lines.extend(f"- {item}" for item in explicit_requirements[:10])
         if preserve_literals:
-            lines.append("User-specified names, signatures and literals to preserve exactly:")
+            lines.append("Литералы из planner_json (вспомогательные, сохраняй только если они есть в исходном запросе или не противоречат ему):")
             lines.extend(f"- {item}" for item in preserve_literals[:12])
         if intent_summary:
-            lines.append(f"Planned intent: {intent_summary}")
+            lines.append(f"Планируемое намерение из planner_json: {intent_summary}")
         if planner_constraints:
-            lines.append("Planner constraints:")
+            lines.append("Ограничения из planner_json (вспомогательные):")
             lines.extend(f"- {item}" for item in planner_constraints[:8])
 
     return "\n".join(lines).strip()
@@ -1728,7 +1804,7 @@ def build_test_planner_user_prompt(
     )
     model_surfaces_text, model_surfaces_metrics = _render_model_surfaces(
         pc,
-        max_chars=_block_limit(runtime_config, "generate_block_chars", "model_surfaces", 1200),
+        max_chars=min(_block_limit(runtime_config, "generate_block_chars", "model_surfaces", 1200), 900),
     )
     contract_metrics.update(model_surfaces_metrics)
     contract_context_block = _render_optional_block(
@@ -1737,7 +1813,7 @@ def build_test_planner_user_prompt(
     )
     contract_attribute_text, contract_attribute_metrics = _render_contract_attribute_requirements(
         pc,
-        max_chars=_block_limit(runtime_config, "generate_block_chars", "contract_attribute_requirements", 1600),
+        max_chars=min(_block_limit(runtime_config, "generate_block_chars", "contract_attribute_requirements", 1600), 900),
     )
     contract_attribute_block = _render_optional_block(
         "Contract attribute requirements for generated test data",
@@ -1798,6 +1874,7 @@ def build_test_planner_user_prompt(
         "parent_qualname": request.target.get("parent_qualname") or "",
         "target_source": target_executable_source or "none",
         "full_file_source": full_file_source or "none",
+        "full_file_source_block": _render_optional_block("Справочный исходный текст файла до изменения", full_file_source),
         "related_tests_block": _render_optional_block("Связанные тесты проекта", related_tests_text),
         "import_context_block": _render_optional_block("Импорты из целевого файла", import_context_text),
         "inferred_symbols_block": _render_optional_block("Символы проекта из target-кода", inferred_symbols_text),
@@ -2038,7 +2115,16 @@ def build_coder_user_prompt(
     target_text = _render_target_symbol(
         pc.get("target_symbol") or pc.get("target_function") or {}
     )
+    target_original_docstring = _extract_primary_docstring_from_python_source(target_text)
+    target_docstring_guidance_text = _render_docstring_update_guidance(target_original_docstring)
+    target_docstrings_removed = False
+    if target_text:
+        target_text, target_docstrings_removed = _strip_docstrings_from_python_source(target_text)
+
     full_file_text = str(pc.get("full_file_source", "") or "")
+    full_file_docstrings_removed = False
+    if full_file_text:
+        full_file_text, full_file_docstrings_removed = _strip_docstrings_from_python_source(full_file_text)
     if runtime_config.coder_max_full_file_chars <= 0:
         full_file_text = ""
     else:
@@ -2066,6 +2152,8 @@ def build_coder_user_prompt(
         pc,
         max_items=runtime_config.coder_max_contract_symbols,
         per_item_chars=runtime_config.coder_max_contract_symbol_chars,
+        include_docstrings=False,
+        strip_source_docstrings=True,
     )
     contract_context_text = _normalize_optional_value(contract_context_text)
 
@@ -2216,8 +2304,12 @@ def build_coder_user_prompt(
                 "Структура модуля",
                 _normalize_optional_value(module_outline_value),
             ),
+            target_docstring_block=_render_optional_block(
+                "Docstring существующего target-symbol для обновления",
+                target_docstring_guidance_text,
+            ),
             target_function_block=_render_optional_block(
-                "Целевой symbol / anchor",
+                "Исполняемый код целевого symbol / anchor без документации",
                 target_value,
             ),
             reference_function_block=_render_optional_block(
@@ -2225,7 +2317,7 @@ def build_coder_user_prompt(
                 _normalize_optional_value(reference_value),
             ),
             full_file_source_block=_render_optional_block(
-                "Полный исходный текст файла",
+                "Справочный исполняемый контекст файла до изменения без документации",
                 _normalize_optional_value(full_file_value),
             ),
             related_tests_block=_render_optional_block(
@@ -2544,6 +2636,9 @@ def build_coder_user_prompt(
         before_trim,
         len(prompt),
         trim_steps,
+        target_docstrings_removed=target_docstrings_removed,
+        full_file_docstrings_removed=full_file_docstrings_removed,
+        contract_context_docstrings_removed=bool(contract_metrics.get("contract_symbol_sources_docstrings_removed")),
     )
     metrics.update(ref_metrics)
     metrics.update(related_test_metrics)
@@ -2553,6 +2648,8 @@ def build_coder_user_prompt(
     )
     metrics["coder_available_imports_chars"] = len(available_imports_text)
     metrics["coder_preservation_guidance_chars"] = len(preservation_guidance_text)
+    metrics["coder_target_docstring_guidance_chars"] = len(target_docstring_guidance_text)
+    metrics["coder_target_original_docstring_chars"] = len(target_original_docstring)
     metrics["coder_prompt_section_sizes_final"] = final_section_sizes
 
     logger.info(
@@ -3478,6 +3575,36 @@ def _use_static_entrypoint_test_strategy(source: str, request: GenerationRequest
         and _request_explicitly_targets_module_start(request)
     )
 
+
+
+def _request_or_target_needs_rich_test_context(
+    *,
+    target_file: str,
+    target_source: str,
+    full_file_source: str,
+    request: GenerationRequest,
+) -> bool:
+    """Return True when generated-test prompt should keep a compact full-file excerpt.
+
+    Simple mode normally relies on target code, imports, model surfaces and
+    constructor guidance. Full-file source is kept only for UI/entrypoint or
+    framework-heavy code where setup patterns are often defined outside the
+    target symbol.
+    """
+    text = "\n".join([
+        str(target_file or ""),
+        str(target_source or ""),
+        str(full_file_source or "")[:4000],
+        _request_text_for_test_strategy(request),
+    ]).lower()
+    markers = (
+        "pyqt", "pyside", "qtwidgets", "qapplication", "qwidget", "qmainwindow",
+        "tkinter", "customtkinter", "kivy", "wx.", "gui", "ui", "window",
+        "окно", "кноп", "меню", "toolbar", "statusbar", "event loop",
+        "__main__", "sys.exit", "app.exec", "mainloop", "fastapi", "flask",
+    )
+    return any(marker in text for marker in markers)
+
 def _self_attribute_chain(node: ast.AST) -> list[str] | None:
     """Return attribute chain after ``self`` for an Attribute node.
 
@@ -3740,6 +3867,7 @@ def _render_test_constructor_guidance(
                 "Конструктор parent class видим, но для текущего target-кода не является рекомендуемым setup.",
                 "Target-код не использует self и не требует состояния реального экземпляра.",
                 "Не создавай настоящий экземпляр parent class только ради проверки этого метода; передай `None` или локальный fake/stub объект как self и вызови метод как unbound method через parent class.",
+                "Не создавай неиспользуемую переменную parent class и не вызывай его конструктор с None, строковой заглушкой или искусственными аргументами только ради использования class из must_use_symbols.",
                 "Создавай настоящий экземпляр только если исходный запрос или сам target-код явно требуют реального конструктора, GUI-состояния или inherited runtime behavior.",
             ]
         )
@@ -3751,6 +3879,7 @@ def _render_test_constructor_guidance(
                 "Конструктор parent class видим, но для текущего target-кода не является рекомендуемым setup.",
                 f"Target-код использует только простые self-атрибуты: {attrs}.",
                 "Не создавай настоящий экземпляр parent class только ради проверки этого метода; используй fake/stub объект или `types.SimpleNamespace` и вызови метод как unbound method через parent class.",
+                "Не создавай неиспользуемую переменную parent class и не вызывай его конструктор с None, строковой заглушкой или искусственными аргументами только ради использования class из must_use_symbols.",
                 "Создавай настоящий экземпляр только если исходный запрос или сам target-код явно требуют реального конструктора, GUI-состояния или inherited runtime behavior.",
             ]
         )
@@ -3912,19 +4041,106 @@ def _extract_return_expressions(source: str) -> list[str]:
     return _dedupe_preserve_order(returns, limit=5)
 
 
-def _extract_explicit_output_dict_keys(source: str) -> list[str]:
-    keys: list[str] = []
+def _target_builds_generated_string_result(source: str) -> bool:
     try:
         tree = ast.parse(textwrap.dedent(source or ""))
     except SyntaxError:
-        return keys
+        return False
+
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Dict):
+        if isinstance(node, ast.JoinedStr):
+            return True
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            return True
+    return False
+
+
+def _dict_literal_string_keys(node: ast.AST) -> list[str]:
+    if not isinstance(node, ast.Dict):
+        return []
+    keys: list[str] = []
+    for key in node.keys:
+        if isinstance(key, ast.Constant) and isinstance(key.value, str):
+            keys.append(key.value)
+    return keys
+
+
+def _name_loads(node: ast.AST) -> set[str]:
+    return {
+        child.id
+        for child in ast.walk(node)
+        if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
+    }
+
+
+def _extract_observable_output_dict_keys(source: str) -> list[str]:
+    """Return keys for dicts that are part of observable output/state.
+
+    Local helper dictionaries are often implementation details, for example
+    lookup tables used by normalization code. They should not become generated
+    test contracts. We only surface dict keys when the dict literal is returned,
+    assigned to observable state, or passed to another call such as a serializer
+    or result/model constructor.
+    """
+    try:
+        tree = ast.parse(textwrap.dedent(source or ""))
+    except SyntaxError:
+        return []
+
+    assigned_dict_keys: dict[str, list[str]] = {}
+    observable_keys: list[str] = []
+
+    def add_keys(keys: list[str]) -> None:
+        for key in keys:
+            if key not in observable_keys:
+                observable_keys.append(key)
+
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
             continue
-        for key in node.keys:
-            if isinstance(key, ast.Constant) and isinstance(key.value, str):
-                keys.append(key.value)
-    return _dedupe_preserve_order(keys, limit=20)
+        value = node.value
+        keys = _dict_literal_string_keys(value)
+        if not keys:
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        for target in targets:
+            if isinstance(target, ast.Name):
+                assigned_dict_keys[target.id] = keys
+            elif isinstance(target, (ast.Attribute, ast.Subscript)):
+                # Assignment to object state or a container is observable enough
+                # for generated tests to treat keys as part of a contract.
+                add_keys(keys)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Return) and node.value is not None:
+            add_keys(_dict_literal_string_keys(node.value))
+            if isinstance(node.value, ast.Name):
+                add_keys(assigned_dict_keys.get(node.value.id, []))
+            continue
+
+        if isinstance(node, ast.Call):
+            # A dict passed to another callable can be saved, serialized or used
+            # to construct a visible result/model object. In contrast, a local
+            # lookup dict used via mapping.get(...) is not passed as an argument
+            # and remains an implementation detail.
+            for arg in node.args:
+                add_keys(_dict_literal_string_keys(arg))
+                if isinstance(arg, ast.Name):
+                    add_keys(assigned_dict_keys.get(arg.id, []))
+            for kw in node.keywords:
+                value = kw.value
+                add_keys(_dict_literal_string_keys(value))
+                if isinstance(value, ast.Name):
+                    add_keys(assigned_dict_keys.get(value.id, []))
+
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            for element in node.elts:
+                add_keys(_dict_literal_string_keys(element))
+
+    # If a dict assigned to a local name is never returned, stored, or passed to
+    # another call, do not report its keys. This avoids turning internal lookup
+    # tables into generated-test expectations.
+    return _dedupe_preserve_order(observable_keys, limit=20)
 
 
 def _render_test_observable_contract_guidance(
@@ -3943,7 +4159,14 @@ def _render_test_observable_contract_guidance(
               "Не сравнивай результат с заранее записанным примером из документации и не собирай такое же значение вручную из даты, имени, темы, идентификатора или других частей."
         )
 
-    keys = _extract_explicit_output_dict_keys(target_source)
+    if _target_builds_generated_string_result(target_source):
+        lines.append(
+            "Target-код собирает строковый результат из нескольких частей или нормализаций. "
+            "Для такого результата не пиши exact equality со всей строкой, собранной вручную в тесте. "
+            "Проверяй устойчивые свойства результата: тип, непустоту, обязательный суффикс/литерал, наличие явно заданной даты или другого входного фрагмента, если это прямо следует из запроса и исполняемого кода."
+        )
+
+    keys = _extract_observable_output_dict_keys(target_source)
     if keys:
         lines.append(
             "Target-код явно формирует структурированные данные с ключами: "
@@ -4047,7 +4270,8 @@ def _render_test_behavior_guidance(
     if method_does_not_use_self:
         lines.append(
             "Target-код не использует self. Не создавай настоящий экземпляр parent class только ради проверки этого метода. "
-            "Передай `None` или локальный fake/stub объект как self и вызывай метод как unbound method через parent class."
+            "Передай `None` или локальный fake/stub объект как self и вызывай метод как unbound method через parent class. "
+            "Не создавай неиспользуемую переменную parent class и не вызывай его конструктор с None, строковой заглушкой или искусственными аргументами только ради использования class из must_use_symbols."
         )
     elif simple_self_attrs:
         attrs = ", ".join(simple_self_attrs)
@@ -4436,7 +4660,7 @@ def build_test_generator_user_prompt(
     related_tests_text, related_test_metrics = _render_related_tests(
         pc,
         max_items=1,
-        per_item_chars=500,
+        per_item_chars=350,
         strip_source_docstrings=True,
     )
 
@@ -4444,7 +4668,7 @@ def build_test_generator_user_prompt(
     if has_related_tests:
         example_text = ""
     else:
-        example_text, _ = _truncate_text(example_test_source or "", 700)
+        example_text, _ = _truncate_text(example_test_source or "", 350)
 
     reference_context_block, reference_metrics = _build_test_reference_context_block(
         request.reference_context or {},
@@ -4452,8 +4676,8 @@ def build_test_generator_user_prompt(
     )
     contract_context_text, contract_metrics = _render_contract_context(
         pc,
-        max_items=runtime_config.test_prompt_contract_symbols,
-        per_item_chars=runtime_config.test_prompt_contract_symbol_chars,
+        max_items=min(runtime_config.test_prompt_contract_symbols, 2),
+        per_item_chars=min(runtime_config.test_prompt_contract_symbol_chars, 450),
         include_docstrings=False,
         strip_source_docstrings=True,
     )
@@ -4707,11 +4931,9 @@ def build_test_generator_user_prompt(
         prompt = _render_prompt()
         _log("after_remove_import_context", prompt)
 
-# Full file убираем раньше related tests:
-# related tests для тестогенерации обычно ценнее, потому что показывают
-# реальный паттерн создания и использования project objects.
-# import_context тоже стараемся держать дольше, потому что он помогает
-# использовать реальные import path и не придумывать отсутствующие модули.
+    # Full-file source стараемся сохранить: он помогает с imports/setup,
+    # особенно для UI/entrypoint и нестандартных project object patterns.
+    # При жестком overflow он может быть удален только после попытки сжатия.
     if not _fits_with_soft_overflow(prompt) and reference_context_block:
         reference_context_block = ""
         _record("removed reference_context_block on hard size overflow")
@@ -4830,6 +5052,7 @@ def build_test_generator_user_prompt(
         "test_has_import_context_block": bool(import_context_text),
         "test_has_inferred_symbols_block": bool(inferred_symbols_text),
         "test_has_full_file_context": bool(full_file_source_text),
+        "test_full_file_source_context_included": bool(full_file_source_text),
         "test_has_reference_context": bool(reference_context_block),
         "test_has_contract_context": bool(contract_context_block),
         "test_has_contract_attribute_requirements": bool(contract_attribute_requirements_block),

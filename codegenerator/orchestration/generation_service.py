@@ -58,6 +58,26 @@ def _add_step(trace: dict[str, Any], step: str, payload: dict[str, Any]) -> None
     trace["steps"].append({"step": step, "payload": payload})
 
 
+
+
+def _warning_messages_from_format_warnings(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    messages: list[str] = []
+    for item in value:
+        if isinstance(item, dict):
+            code = str(item.get("code") or "format_warning").strip()
+            message = str(item.get("message") or "").strip()
+            if code and message:
+                messages.append(f"{code}: {message}")
+            elif code:
+                messages.append(code)
+            elif message:
+                messages.append(message)
+        elif item:
+            messages.append(str(item))
+    return messages
+
 def _available_user_chars(limit: int, system_prompt: str, *, min_user_prompt_chars: int, user_prompt_reserve_chars: int) -> int:
     reserve = len(system_prompt or "")
     available = limit - reserve
@@ -707,6 +727,7 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
                     "generated_code_context": generated_code_context,
                 }
             )
+            warnings.extend(_warning_messages_from_format_warnings(test_result.get("format_warnings")))
             test_artifact = TestArtifact(
                 file_path=test_result["test_file"],
                 source_code=test_result["code"],
@@ -912,6 +933,7 @@ def generate_test(request: GenerationRequest, config_path: str) -> GenerationRes
             },
         )
 
+        warnings = _warning_messages_from_format_warnings(test_result.get("format_warnings"))
         test_artifact = TestArtifact(
             file_path=test_result["test_file"],
             source_code=test_result["code"],
@@ -923,6 +945,7 @@ def generate_test(request: GenerationRequest, config_path: str) -> GenerationRes
             test_artifact=test_artifact,
             planner_result=None,
             test_planner_result=request.test_plan,
+            warnings=warnings,
             trace_path=str(trace_path),
             llm_usage=trace.get('llm_usage'),
         )
@@ -1144,6 +1167,53 @@ def _as_review_list(value: Any) -> list[Any]:
     return [value]
 
 
+
+def _strip_single_json_markdown_fence(text: str) -> tuple[str, bool]:
+    stripped = (text or '').strip()
+    if not stripped.startswith('```') or not stripped.endswith('```'):
+        return text, False
+    lines = stripped.splitlines()
+    if len(lines) < 3:
+        return text, False
+    opening = lines[0].strip()
+    closing = lines[-1].strip()
+    if not opening.startswith('```') or closing != '```':
+        return text, False
+    language = opening[3:].strip().lower()
+    if language and language != 'json':
+        return text, False
+    inner = '\n'.join(lines[1:-1]).strip()
+    if not inner.startswith('{') or not inner.endswith('}'):
+        return text, False
+    return inner, True
+
+
+def _parse_generated_test_review_response(content: str) -> dict[str, Any]:
+    try:
+        return parse_json_object(content)
+    except ValueError as original_exc:
+        unfenced, stripped_fence = _strip_single_json_markdown_fence(content)
+        if not stripped_fence:
+            raise
+        try:
+            data = parse_json_object(unfenced)
+        except Exception:
+            raise original_exc
+        diagnostics = data.get('_diagnostics') if isinstance(data.get('_diagnostics'), dict) else {}
+        diagnostics = dict(diagnostics)
+        diagnostics['json_markdown_fence_stripped'] = True
+        diagnostics['json_contract_warning'] = 'Модель вернула JSON внутри markdown-блока; fence был снят перед parsing без изменения JSON-содержимого.'
+        data['_diagnostics'] = diagnostics
+        format_warnings = data.get('format_warnings') if isinstance(data.get('format_warnings'), list) else []
+        format_warnings = list(format_warnings)
+        format_warnings.append({
+            'code': 'review_json_markdown_fence_stripped',
+            'message': 'Модель вернула review JSON внутри markdown-блока; wrapper был снят перед parsing.',
+        })
+        data['format_warnings'] = format_warnings
+        return data
+
+
 def _normalize_generated_test_review(review: Any) -> dict[str, Any]:
     """Return a stable advisory-review payload for codecollector/codeui.
 
@@ -1288,7 +1358,7 @@ def review_generated_test_failure(request: dict[str, Any], config_path: str) -> 
             think=config.ollama.think,
             config=config,
             step_name_for_gateway='generated_test_review',
-            parser=parse_json_object,
+            parser=_parse_generated_test_review_response,
             extra_payload={'prompt_metrics': metrics},
         )
         parsed = _normalize_generated_test_review(parsed)
@@ -1302,6 +1372,7 @@ def review_generated_test_failure(request: dict[str, Any], config_path: str) -> 
             'review': parsed,
             'trace_path': str(trace_path),
             'llm_usage': trace.get('llm_usage') or {},
+            'format_warnings': parsed.get('format_warnings') if isinstance(parsed, dict) else [],
             'error_type': None,
             'message': None,
         }
