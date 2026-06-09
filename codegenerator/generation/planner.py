@@ -3,6 +3,14 @@ from typing import Any
 from codegenerator.parsing.response_parser import parse_llm_json
 
 CANONICAL_OPERATIONS = {"replace_symbol", "insert_after_symbol", "add_symbol"}
+PLANNER_DISALLOWED_CODE_ARTIFACT_KEYS = {
+    "code",
+    "import_changes",
+    "test_file",
+    "source_code",
+    "target_qualname",
+    "insert_after",
+}
 
 
 def _normalize_operation(operation: str) -> str:
@@ -39,6 +47,39 @@ def _normalize_string_list(value: Any) -> list[str]:
     return [text] if text else []
 
 
+def _normalize_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value or '').strip().lower()
+    return text in {'true', '1', 'yes', 'да', 'required', 'обязательно'}
+
+
+def _normalize_suggested_reuse(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    items = value if isinstance(value, list) else [value]
+    result: list[dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, dict):
+            symbol = str(
+                item.get('symbol')
+                or item.get('name')
+                or item.get('qualname')
+                or item.get('reference_symbol')
+                or ''
+            ).strip()
+            reason = str(item.get('reason') or item.get('usage') or item.get('why') or '').strip()
+            required = _normalize_bool(item.get('required'))
+        else:
+            symbol = str(item or '').strip()
+            reason = ''
+            required = False
+        if not symbol and not reason:
+            continue
+        result.append({'symbol': symbol, 'reason': reason, 'required': required})
+    return result
+
+
 def _fallback_intent_summary(parsed: dict[str, Any]) -> str:
     for key in ('intent_summary', 'summary', 'description', 'reason'):
         value = str(parsed.get(key) or '').strip()
@@ -56,6 +97,15 @@ def _fallback_intent_summary(parsed: dict[str, Any]) -> str:
 def validate_planner_result(parsed: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise ValueError('planner result must be a JSON object')
+
+    unexpected_artifact_keys = sorted(
+        key for key in parsed if key in PLANNER_DISALLOWED_CODE_ARTIFACT_KEYS
+    )
+    if unexpected_artifact_keys:
+        raise ValueError(
+            'planner result must not contain code artifact keys: '
+            + ', '.join(unexpected_artifact_keys)
+        )
 
     status = str(parsed.get('status') or 'ok').strip().lower()
     if status not in {'ok', 'needs_planning', 'not_enough_context'}:
@@ -76,12 +126,24 @@ def validate_planner_result(parsed: dict[str, Any]) -> dict[str, Any]:
         parsed.setdefault('expected_new_symbol_kind', None)
         parsed.setdefault('parent_qualname', None)
         parsed['explicit_requirements'] = _normalize_string_list(parsed.get('explicit_requirements'))
+        parsed['implementation_constraints'] = _normalize_string_list(parsed.get('implementation_constraints'))
+        parsed['suggested_reuse'] = _normalize_suggested_reuse(parsed.get('suggested_reuse'))
+        parsed['forbidden_assumptions'] = _normalize_string_list(parsed.get('forbidden_assumptions'))
         parsed['preserve_literals'] = _normalize_string_list(parsed.get('preserve_literals'))
         parsed.setdefault('reason', str(parsed.get('message') or parsed.get('reason') or status))
         parsed.setdefault('suggested_next_step', '')
         return parsed
 
-    required = ['operation', 'target_file', 'target_symbol']
+    required = [
+        'operation',
+        'target_file',
+        'target_symbol',
+        'explicit_requirements',
+        'implementation_constraints',
+        'suggested_reuse',
+        'forbidden_assumptions',
+        'preserve_literals',
+    ]
     missing = [key for key in required if key not in parsed]
     if missing:
         raise ValueError(f"planner result is missing required keys: {', '.join(missing)}")
@@ -100,6 +162,9 @@ def validate_planner_result(parsed: dict[str, Any]) -> dict[str, Any]:
     parsed.setdefault('expected_new_symbol_kind', None)
     parsed.setdefault('parent_qualname', None)
     parsed['explicit_requirements'] = _normalize_string_list(parsed.get('explicit_requirements'))
+    parsed['implementation_constraints'] = _normalize_string_list(parsed.get('implementation_constraints'))
+    parsed['suggested_reuse'] = _normalize_suggested_reuse(parsed.get('suggested_reuse'))
+    parsed['forbidden_assumptions'] = _normalize_string_list(parsed.get('forbidden_assumptions'))
     parsed['preserve_literals'] = _normalize_string_list(parsed.get('preserve_literals'))
     return parsed
 

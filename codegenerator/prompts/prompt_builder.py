@@ -1572,6 +1572,31 @@ def _render_constraints_block(constraints: list[str], limit: int = 6) -> str:
     return "\n".join(f"- {item}" for item in constraints[:limit])
 
 
+def _render_suggested_reuse_items(items: Any, limit: int = 6) -> list[str]:
+    rendered: list[str] = []
+    if not isinstance(items, list):
+        return rendered
+    for item in items[:limit]:
+        if isinstance(item, dict):
+            symbol = str(item.get("symbol") or item.get("name") or item.get("qualname") or "").strip()
+            reason = str(item.get("reason") or item.get("usage") or "").strip()
+            required = bool(item.get("required"))
+            parts = []
+            if symbol:
+                parts.append(symbol)
+            if reason:
+                parts.append(reason)
+            text = " — ".join(parts).strip()
+            if text:
+                suffix = "обязательный" if required else "необязательный"
+                rendered.append(f"- {text} ({suffix} reuse)")
+        else:
+            text = str(item or "").strip()
+            if text:
+                rendered.append(f"- {text} (необязательный reuse)")
+    return rendered
+
+
 def _compact_change_request_for_codegen(
     change_request: dict[str, Any],
     planner_result: dict[str, Any] | None = None,
@@ -1581,7 +1606,6 @@ def _compact_change_request_for_codegen(
     title = str(change_request.get("title", "") or "").strip()
     description = str(change_request.get("description", "") or "").strip()
     constraints = [str(item) for item in (change_request.get("constraints") or []) if item]
-
     lines: list[str] = []
     if title:
         lines.append(f"Title: {title}")
@@ -1635,18 +1659,38 @@ def _compact_change_request_for_codegen(
         ]
         intent_summary = str(filtered_planner.get("intent_summary", "") or "").strip()
         planner_constraints = [str(item) for item in (filtered_planner.get("constraints") or []) if item]
+        implementation_constraints = [
+            str(item).strip()
+            for item in (filtered_planner.get("implementation_constraints") or [])
+            if str(item).strip()
+        ]
+        forbidden_assumptions = [
+            str(item).strip()
+            for item in (filtered_planner.get("forbidden_assumptions") or [])
+            if str(item).strip()
+        ]
+        suggested_reuse_lines = _render_suggested_reuse_items(filtered_planner.get("suggested_reuse") or [])
 
         if explicit_requirements:
-            lines.append("Требования из planner_json (вспомогательные, сверяй с исходным запросом):")
+            lines.append("Требования пользователя из planner_json (must, сверяй с исходным запросом):")
             lines.extend(f"- {item}" for item in explicit_requirements[:10])
         if preserve_literals:
-            lines.append("Литералы из planner_json (вспомогательные, сохраняй только если они есть в исходном запросе или не противоречат ему):")
+            lines.append("Литералы из planner_json (must, только если они есть в исходном запросе или не противоречат ему):")
             lines.extend(f"- {item}" for item in preserve_literals[:12])
         if intent_summary:
             lines.append(f"Планируемое намерение из planner_json: {intent_summary}")
         if planner_constraints:
-            lines.append("Ограничения из planner_json (вспомогательные):")
-            lines.extend(f"- {item}" for item in planner_constraints[:8])
+            lines.append("Общие ограничения из planner_json:")
+            lines.extend(f"- {item}" for item in planner_constraints[:6])
+        if implementation_constraints:
+            lines.append("Технические ограничения применения из planner_json:")
+            lines.extend(f"- {item}" for item in implementation_constraints[:8])
+        if suggested_reuse_lines:
+            lines.append("Необязательный suggested_reuse из planner_json:")
+            lines.extend(suggested_reuse_lines[:6])
+        if forbidden_assumptions:
+            lines.append("Запрещенные допущения из planner_json:")
+            lines.extend(f"- {item}" for item in forbidden_assumptions[:8])
 
     return "\n".join(lines).strip()
 
@@ -1708,11 +1752,20 @@ def _filter_planner_result_for_insert_after(
                 return True
         return False
 
-    for key in ("explicit_requirements", "preserve_literals"):
+    for key in ("explicit_requirements", "preserve_literals", "implementation_constraints", "forbidden_assumptions"):
         values = result.get(key) or []
         if isinstance(values, str):
             values = [values]
         result[key] = [str(item).strip() for item in values if str(item).strip() and not is_forbidden_item(item)]
+
+    reuse_items = result.get("suggested_reuse") or []
+    if isinstance(reuse_items, list):
+        filtered_reuse = []
+        for item in reuse_items:
+            text = json.dumps(item, ensure_ascii=False) if isinstance(item, dict) else str(item or "")
+            if text.strip() and not is_forbidden_item(text):
+                filtered_reuse.append(item)
+        result["suggested_reuse"] = filtered_reuse
 
     intent = str(result.get("intent_summary") or "").strip()
     if intent and is_forbidden_item(intent):
@@ -3746,6 +3799,35 @@ def _extract_self_attr_method_calls_for_test_guidance(source: str) -> dict[str, 
     return calls
 
 
+def _extract_direct_return_self_attr_method_calls_for_test_guidance(source: str) -> dict[str, list[str]]:
+    """Return dependency method calls whose value is returned directly.
+
+    Direct-return dependency calls need more specific test guidance than the
+    generic "represent dependency by fake/stub" rule: the fake should return a
+    sentinel and record arguments, not recreate the dependency algorithm.
+    """
+    try:
+        tree = ast.parse(textwrap.dedent(str(source or "")))
+    except SyntaxError:
+        return {}
+
+    calls: dict[str, list[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Return) or not isinstance(node.value, ast.Call):
+            continue
+        call = node.value
+        if not isinstance(call.func, ast.Attribute):
+            continue
+        chain = _self_attribute_chain(call.func)
+        if not chain or len(chain) != 2:
+            continue
+        attr_name, method_name = chain
+        methods = calls.setdefault(attr_name, [])
+        if method_name not in methods:
+            methods.append(method_name)
+    return calls
+
+
 
 def _has_guard_return_before_later_effects_for_test_guidance(source: str) -> bool:
     """Return True when a function has a guard ``return`` before later effects.
@@ -4055,9 +4137,7 @@ def _target_builds_generated_string_result(source: str) -> bool:
     return False
 
 
-def _dict_literal_string_keys(node: ast.AST) -> list[str]:
-    if not isinstance(node, ast.Dict):
-        return []
+def _dict_literal_keys(node: ast.Dict) -> list[str]:
     keys: list[str] = []
     for key in node.keys:
         if isinstance(key, ast.Constant) and isinstance(key.value, str):
@@ -4065,82 +4145,156 @@ def _dict_literal_string_keys(node: ast.AST) -> list[str]:
     return keys
 
 
-def _name_loads(node: ast.AST) -> set[str]:
-    return {
-        child.id
-        for child in ast.walk(node)
-        if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
-    }
-
-
 def _extract_observable_output_dict_keys(source: str) -> list[str]:
-    """Return keys for dicts that are part of observable output/state.
+    """Return keys from dict literals that are part of observable output.
 
-    Local helper dictionaries are often implementation details, for example
-    lookup tables used by normalization code. They should not become generated
-    test contracts. We only surface dict keys when the dict literal is returned,
-    assigned to observable state, or passed to another call such as a serializer
-    or result/model constructor.
+    Local lookup tables or internal mapping dictionaries should not become test
+    contracts. This helper is intentionally conservative: it reports keys only
+    when a dict literal is returned, assigned to visible object/container state,
+    or passed to another call such as a serializer/result constructor.
     """
+    keys: list[str] = []
+    try:
+        tree = ast.parse(textwrap.dedent(source or ""))
+    except SyntaxError:
+        return keys
+
+    dict_names: dict[str, list[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Dict):
+            literal_keys = _dict_literal_keys(node.value)
+            if not literal_keys:
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    dict_names[target.id] = literal_keys
+                elif isinstance(target, (ast.Attribute, ast.Subscript)):
+                    keys.extend(literal_keys)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.value, ast.Dict):
+            literal_keys = _dict_literal_keys(node.value)
+            if not literal_keys:
+                continue
+            if isinstance(node.target, ast.Name):
+                dict_names[node.target.id] = literal_keys
+            elif isinstance(node.target, (ast.Attribute, ast.Subscript)):
+                keys.extend(literal_keys)
+
+    def add_name_if_observable(value: ast.AST) -> None:
+        if isinstance(value, ast.Name) and value.id in dict_names:
+            keys.extend(dict_names[value.id])
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Return):
+            if isinstance(node.value, ast.Dict):
+                keys.extend(_dict_literal_keys(node.value))
+            elif node.value is not None:
+                add_name_if_observable(node.value)
+        elif isinstance(node, ast.Call):
+            for arg in node.args:
+                if isinstance(arg, ast.Dict):
+                    keys.extend(_dict_literal_keys(arg))
+                else:
+                    add_name_if_observable(arg)
+            for keyword in node.keywords:
+                if isinstance(keyword.value, ast.Dict):
+                    keys.extend(_dict_literal_keys(keyword.value))
+                else:
+                    add_name_if_observable(keyword.value)
+        elif isinstance(node, ast.Assign):
+            if any(isinstance(target, (ast.Attribute, ast.Subscript)) for target in node.targets):
+                add_name_if_observable(node.value)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, (ast.Attribute, ast.Subscript)):
+            if node.value is not None:
+                add_name_if_observable(node.value)
+
+    return _dedupe_preserve_order(keys, limit=20)
+
+
+def _extract_direct_return_call_guidance(source: str) -> list[str]:
+    lines: list[str] = []
+    try:
+        tree = ast.parse(textwrap.dedent(source or ""))
+    except SyntaxError:
+        return lines
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Return) or not isinstance(node.value, ast.Call):
+            continue
+        call = node.value
+        call_text = _call_to_text(call)
+        if not call_text:
+            continue
+        arg_texts = [_call_to_text(arg) for arg in call.args]
+        arg_texts = [item for item in arg_texts if item]
+        args_suffix = f" Аргументы вызова: {', '.join(arg_texts)}." if arg_texts else ""
+        chain: list[str] | None = None
+        if isinstance(call.func, ast.Attribute):
+            chain = _self_attribute_chain(call.func)
+        if chain and len(chain) == 2:
+            lines.append(
+                f"Target-код напрямую возвращает результат вызова dependency method `{call_text}`. "
+                "Если в тесте используешь fake/stub для этой зависимости, fake/stub не должен повторять ее внутренний алгоритм и собирать реальный составной результат. "
+                "Пусть fake/stub только сохранит полученные аргументы и вернет простой sentinel-result; проверяй, что target вернул этот sentinel-result и передал ожидаемые уже подготовленные значения."
+                + args_suffix
+            )
+        elif chain and len(chain) == 1:
+            lines.append(
+                f"Target-код напрямую возвращает результат вызова метода того же экземпляра `{call_text}`. "
+                "Если тест подменяет этот helper, подмена должна возвращать простое заранее заданное значение и фиксировать аргументы вызова; не повторяй алгоритм helper-а вручную в assert."
+                + args_suffix
+            )
+        elif isinstance(call.func, ast.Name):
+            lines.append(
+                f"Target-код напрямую возвращает результат вызова helper-функции `{call_text}`. "
+                "Если тест подменяет этот helper, подмена должна возвращать простое заранее заданное значение и фиксировать аргументы вызова; не повторяй алгоритм helper-а вручную в assert."
+                + args_suffix
+            )
+    return _dedupe_preserve_order(lines, limit=4)
+
+
+def _extract_bare_call_names_for_test_guidance(source: str) -> list[str]:
+    excluded = {
+        "if",
+        "for",
+        "while",
+        "return",
+        "len",
+        "str",
+        "int",
+        "float",
+        "bool",
+        "list",
+        "dict",
+        "set",
+        "tuple",
+        "print",
+        "range",
+        "isinstance",
+        "super",
+        "open",
+        "enumerate",
+        "zip",
+        "any",
+        "all",
+        "sum",
+        "min",
+        "max",
+        "sorted",
+    }
     try:
         tree = ast.parse(textwrap.dedent(source or ""))
     except SyntaxError:
         return []
-
-    assigned_dict_keys: dict[str, list[str]] = {}
-    observable_keys: list[str] = []
-
-    def add_keys(keys: list[str]) -> None:
-        for key in keys:
-            if key not in observable_keys:
-                observable_keys.append(key)
-
+    names: list[str] = []
     for node in ast.walk(tree):
-        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
             continue
-        value = node.value
-        keys = _dict_literal_string_keys(value)
-        if not keys:
+        name = node.func.id
+        if name in excluded or name.startswith("__"):
             continue
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        for target in targets:
-            if isinstance(target, ast.Name):
-                assigned_dict_keys[target.id] = keys
-            elif isinstance(target, (ast.Attribute, ast.Subscript)):
-                # Assignment to object state or a container is observable enough
-                # for generated tests to treat keys as part of a contract.
-                add_keys(keys)
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Return) and node.value is not None:
-            add_keys(_dict_literal_string_keys(node.value))
-            if isinstance(node.value, ast.Name):
-                add_keys(assigned_dict_keys.get(node.value.id, []))
-            continue
-
-        if isinstance(node, ast.Call):
-            # A dict passed to another callable can be saved, serialized or used
-            # to construct a visible result/model object. In contrast, a local
-            # lookup dict used via mapping.get(...) is not passed as an argument
-            # and remains an implementation detail.
-            for arg in node.args:
-                add_keys(_dict_literal_string_keys(arg))
-                if isinstance(arg, ast.Name):
-                    add_keys(assigned_dict_keys.get(arg.id, []))
-            for kw in node.keywords:
-                value = kw.value
-                add_keys(_dict_literal_string_keys(value))
-                if isinstance(value, ast.Name):
-                    add_keys(assigned_dict_keys.get(value.id, []))
-
-        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
-            for element in node.elts:
-                add_keys(_dict_literal_string_keys(element))
-
-    # If a dict assigned to a local name is never returned, stored, or passed to
-    # another call, do not report its keys. This avoids turning internal lookup
-    # tables into generated-test expectations.
-    return _dedupe_preserve_order(observable_keys, limit=20)
+        if name not in names:
+            names.append(name)
+    return names[:8]
 
 
 def _render_test_observable_contract_guidance(
@@ -4150,28 +4304,14 @@ def _render_test_observable_contract_guidance(
     contract_context_text: str = "",
 ) -> str:
     lines: list[str] = []
-    returns = _extract_return_expressions(target_source)
-    if returns:
-        lines.append(
-            "Проверяемый код возвращает значение, вычисленное выражением: "
-            + "; ".join(returns)
-            + ". В тесте сохрани результат вызова в переменную, если дальше нужно проверить созданные данные, сохраненное состояние или последующее чтение. "
-              "Не сравнивай результат с заранее записанным примером из документации и не собирай такое же значение вручную из даты, имени, темы, идентификатора или других частей."
-        )
-
-    if _target_builds_generated_string_result(target_source):
-        lines.append(
-            "Target-код собирает строковый результат из нескольких частей или нормализаций. "
-            "Для такого результата не пиши exact equality со всей строкой, собранной вручную в тесте. "
-            "Проверяй устойчивые свойства результата: тип, непустоту, обязательный суффикс/литерал, наличие явно заданной даты или другого входного фрагмента, если это прямо следует из запроса и исполняемого кода."
-        )
+    lines.extend(_extract_direct_return_call_guidance(target_source))
 
     keys = _extract_observable_output_dict_keys(target_source)
     if keys:
         lines.append(
-            "Target-код явно формирует структурированные данные с ключами: "
+            "Target-код формирует наблюдаемые структурированные данные с ключами: "
             + ", ".join(keys)
-            + ". Если тест проверяет сохраненные/возвращенные структурированные данные, проверяй именно эти ключи и значения, не добавляя и не пропуская ключи по догадке."
+            + ". Если тест проверяет возвращенные, сохраненные или переданные наружу структурированные данные, проверяй эти ключи и значения, не добавляя и не пропуская ключи по догадке. Локальные lookup/mapping dict внутри алгоритма не являются контрактом теста."
         )
 
     helper_lines: list[str] = []
@@ -4195,7 +4335,7 @@ def _render_test_observable_contract_guidance(
 
     if not lines:
         return ""
-    return "\n".join(f"- {line}" for line in lines)
+    return "\n".join(lines)
 
 
 def _render_test_behavior_guidance(
@@ -4215,33 +4355,7 @@ def _render_test_behavior_guidance(
         if name not in method_names:
             method_names.append(name)
 
-    bare_calls = []
-    excluded = {
-        "if",
-        "for",
-        "while",
-        "return",
-        "len",
-        "str",
-        "int",
-        "float",
-        "bool",
-        "list",
-        "dict",
-        "set",
-        "tuple",
-        "print",
-        "range",
-        "isinstance",
-        "super",
-        "open",
-    }
-    for name in re.findall(r"(?<![\w.])([a-z_][A-Za-z0-9_]*)\s*\(", source):
-        if name in excluded:
-            continue
-        if name in bare_calls:
-            continue
-        bare_calls.append(name)
+    bare_calls = _extract_bare_call_names_for_test_guidance(source)
 
     module_name = ""
     file_path = str(target_file or "").strip()
@@ -4267,6 +4381,15 @@ def _render_test_behavior_guidance(
     method_does_not_use_self = _method_does_not_use_self_for_test_guidance(source)
     simple_self_attrs = _simple_self_attributes_for_test_guidance(source)
     self_attr_method_calls = _extract_self_attr_method_calls_for_test_guidance(source)
+    direct_return_self_attr_method_calls = _extract_direct_return_self_attr_method_calls_for_test_guidance(source)
+    if direct_return_self_attr_method_calls:
+        filtered_self_attr_method_calls: dict[str, list[str]] = {}
+        for attr_name, methods in self_attr_method_calls.items():
+            direct_methods = set(direct_return_self_attr_method_calls.get(attr_name, []))
+            remaining = [method for method in methods if method not in direct_methods]
+            if remaining:
+                filtered_self_attr_method_calls[attr_name] = remaining
+        self_attr_method_calls = filtered_self_attr_method_calls
     if method_does_not_use_self:
         lines.append(
             "Target-код не использует self. Не создавай настоящий экземпляр parent class только ради проверки этого метода. "
@@ -4332,7 +4455,7 @@ def _render_test_behavior_guidance(
         contract_context_text=contract_context_text,
     )
     if observable_guidance:
-        lines.append(observable_guidance)
+        lines.extend(line for line in observable_guidance.splitlines() if line.strip())
     if not lines:
         return ""
     return "\n".join(f"- {line}" for line in lines)

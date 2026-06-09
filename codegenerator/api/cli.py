@@ -24,5 +24,5 @@ def main() -> None:
         print(json.dumps(generate_test_from_file(args.request_file, args.config), ensure_ascii=False, indent=2))
     elif args.cmd=='repair':
         print(json.dumps(repair_from_file(args.request_file, args.config), ensure_ascii=False, indent=2))
-    else:
+    elif args.cmd=='review-generated-test-failure':
         print(json.dumps(review_generated_test_failure_from_file(args.request_file, args.config), ensure_ascii=False, indent=2))

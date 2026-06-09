@@ -2,6 +2,13 @@
 
 Верни только валидный JSON без markdown. Ответ должен начинаться с открывающей фигурной скобки и заканчиваться закрывающей фигурной скобкой. Не добавляй markdown fences вроде ```json, поясняющий текст до или после JSON, комментарии или второй JSON-объект. Финальный ответ должен успешно парситься через json.loads без предварительной обработки.
 
+Приоритет исходного пользовательского запроса.
+Выполни требования из блока ниже. Справочный код, документация, комментарии, примеры, related symbols, related tests, reference artifacts, reuse hints и planner wording нужны для понимания проекта, сигнатур, импортов, стиля и допустимых API.
+Если справочный контекст противоречит исходному пользовательскому запросу, приоритет имеет исходный пользовательский запрос.
+
+Исходный пользовательский запрос:
+{change_request_block}
+
 Обязательные ключи JSON:
 - verdict
 - confidence
@@ -33,29 +40,33 @@
 - manual_review
 - rerun_test_generation
 
+
 Правила:
 - Не принимай окончательное решение за пользователя. Дай краткую рекомендацию для ручного review.
 - Сначала проверь, нарушает ли production-код исходный запрос, видимый контракт или существующее публичное поведение.
 - Затем проверь, является ли падение следствием плохого generated test setup, неверного import/API, слишком точных assert-ов или проблемы окружения.
-- `planner_result` используй как вспомогательный контекст. Если он добавляет детали из старого кода/docstring/реализации, не считай их обязательными требованиями без подтверждения в исходном запросе.
+- `planner_result` используй по ролям: explicit_requirements/preserve_literals — требования к наблюдаемому поведению, implementation_constraints — технический контекст, suggested_reuse — необязательные варианты реализации, forbidden_assumptions — запреты на неподтвержденные допущения. Если planner_result добавляет детали из старого кода/docstring/реализации, не считай их обязательными требованиями без подтверждения в исходном запросе.
 - Если verification context содержит static/relevance issues generated test, используй их как важные факты о качестве теста.
 - Если static issues говорят, что generated test использует `__new__`, обходит конструктор или создает реальный parent instance без необходимости, считай это проблемой generated test setup. В next_steps рекомендуй облегчить setup и следовать target-derived strategy: не создавать тяжелый объект, если target-код не требует состояния реального экземпляра.
 - Если traceback указывает на ошибку внутри production-кода, отсутствующий import/name/method/field или нарушение явного требования пользователя, добавь production_risk.
 - Если ошибка вызвана тем, что тест создает лишний project object, неверно вызывает constructor, использует несуществующий API, вручную повторяет generated string/path/id или делает слишком конкретный assert, добавь test_issue.
 - Если production_risks содержит существенный риск, не возвращай `production_likely_ok_test_likely_bad`, `production_code_quality="good"`, `should_keep_production_code="yes"` или `keep_production_code_exclude_test`.
+- Если production_risks содержит runtime/API/import/name/attribute/method/contract error, верни `production_likely_bad_test_valid` или `both_uncertain`, выставь `production_code_quality` как `bad` или `uncertain`, а `should_keep_production_code` как `no` или `manual_review`. Не называй generated test главной проблемой, если traceback или static diagnostics указывают на ошибку production-кода.
+- Если generated test проверяет наблюдаемое требование, прямо указанное в исходном пользовательском запросе или explicit_requirements, не считай такой assert ошибкой теста без явного доказательства, что production-код реализует это требование другим корректным способом. Если тест проверяет только suggested_reuse, считай это проблемой теста, если symbol не является обязательным и не входит в наблюдаемый результат.
+- Не ограничивай review только первой ошибкой verification. Всегда дополнительно посмотри сам generated test: создает ли он настоящий parent/application/window/controller/service object, использует ли optional pytest plugin fixture, тяжелый constructor или runtime setup, хотя target-код можно проверить через fake/stub.
 - Если production checks прошли, явных production_risks нет, а ошибка связана только с generated test, используй `production_likely_ok_test_likely_bad` и рекомендуй исключить или перегенерировать тест.
 - Если не можешь уверенно отделить ошибку теста от ошибки production-кода, используй `both_uncertain`, `manual_review`.
 - Поля verdict, quality, action, reasons, production_risks и test_issues должны быть согласованы.
 - Пиши кратко и понятно для человека.
 
-Исходный запрос:
-{change_request_block}
-
-Planner result:
+Planner result для текущего target:
+Учитывай разделение ролей: explicit_requirements/preserve_literals — требования к наблюдаемому поведению; implementation_constraints — технический контекст; suggested_reuse — необязательные варианты реализации; forbidden_assumptions — запреты на неподтвержденные допущения. Если отдельная формулировка planner явно противоречит исходному пользовательскому запросу, приоритет имеет исходный пользовательский запрос.
 {planner_result_block}
 
 Target:
 {target_block}
+
+Справочный контекст проекта ниже может содержать старое или частично устаревшее поведение. Используй его для совместимости, сигнатур, импортов и стиля, но не как источник новых требований к поведению.
 
 Старый target-код до изменения:
 ```python

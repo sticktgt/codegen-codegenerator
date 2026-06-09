@@ -1153,7 +1153,6 @@ _REVIEW_ALLOWED_ACTIONS = {
     'rerun_test_generation',
 }
 
-
 def _as_review_list(value: Any) -> list[Any]:
     if value is None:
         return []
@@ -1305,6 +1304,7 @@ def _normalize_generated_test_review(review: Any) -> dict[str, Any]:
 
     normalized['should_keep_production_code'] = keep
     normalized['recommended_action'] = action
+
     for field in ('production_code_quality', 'generated_test_quality', 'recommendation_summary'):
         normalized[field] = str(normalized.get(field) or '')
     if not normalized.get('recommendation_summary'):
@@ -1326,6 +1326,7 @@ def _normalize_generated_test_review(review: Any) -> dict[str, Any]:
         else:
             normalized['next_steps'] = ['Проверить production diff вручную.', 'Проверить generated test вручную или перегенерировать его.']
     return normalized
+
 
 
 def review_generated_test_failure(request: dict[str, Any], config_path: str) -> dict[str, Any]:

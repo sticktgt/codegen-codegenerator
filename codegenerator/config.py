@@ -273,7 +273,20 @@ def load_config(config_path: str | Path | None = None) -> RuntimeConfig:
             test_generator_model=str(models_cfg.get('test_generator_model', 'qwen2.5-coder:7b-instruct')),
             repair_model=str(models_cfg.get('repair_model', models_cfg.get('coder_model', 'qwen2.5-coder:14b-instruct-q4_K_M'))),
         ),
-        prompts=PromptSettings(**{key: str(prompts_cfg.get(key, '')) for key in ['system_rules', 'planner_user_template', 'coder_user_template', 'repair_user_template', 'repair_planner_user_template', 'test_generator_user_template', 'test_generator_example', 'test_planner_user_template', 'generated_test_review_user_template']}),
+        prompts=PromptSettings(**{
+            key: str(prompts_cfg.get(key, default))
+            for key, default in {
+                'system_rules': '',
+                'planner_user_template': '',
+                'coder_user_template': '',
+                'repair_user_template': '',
+                'repair_planner_user_template': '',
+                'test_generator_user_template': '',
+                'test_generator_example': '',
+                'test_planner_user_template': '',
+                'generated_test_review_user_template': '',
+            }.items()
+        }),
         defaults_constraints=[str(item) for item in defaults_cfg.get('constraints', [])],
         repair_enabled=bool(generation_cfg.get('repair_enabled', True)),
         max_repair_attempts=int(generation_cfg.get('max_repair_attempts', 1)),
