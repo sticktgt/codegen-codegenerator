@@ -142,6 +142,7 @@ class RuntimeConfig:
     coder_max_full_file_chars: int
     coder_max_contract_symbols: int
     coder_max_contract_symbol_chars: int
+    type_sensitive_contract_hints_enabled: bool
     repair_prompt_hard_limit: int
     repair_max_reference_chars: int
     repair_max_contract_symbols: int
@@ -299,6 +300,7 @@ def load_config(config_path: str | Path | None = None) -> RuntimeConfig:
         coder_max_full_file_chars=int(generation_cfg.get('coder_max_full_file_chars', 20000)),
         coder_max_contract_symbols=int(generation_cfg.get('coder_max_contract_symbols', 8)),
         coder_max_contract_symbol_chars=int(generation_cfg.get('coder_max_contract_symbol_chars', 1800)),
+        type_sensitive_contract_hints_enabled=bool(generation_cfg.get('type_sensitive_contract_hints_enabled', False)),
         repair_prompt_hard_limit=int(generation_cfg.get('repair_prompt_hard_limit', 42000)),
         repair_max_reference_chars=int(generation_cfg.get('repair_max_reference_chars', 1600)),
         repair_max_contract_symbols=int(generation_cfg.get('repair_max_contract_symbols', 8)),

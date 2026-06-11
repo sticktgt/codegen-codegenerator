@@ -21,6 +21,8 @@
 Правила:
 - Главный источник проверяемого поведения — сгенерированный target-код и исходный запрос пользователя.
 - План должен предполагать прямой вызов target symbol. Не планируй локальную копию, surrogate-функцию или wrapper, который повторяет target-код вместо его вызова.
+- Перед планированием monkeypatch/patch target проверь, где имя реально разрешается в сгенерированном target-коде: module-level binding, imported provider path, local import внутри target symbol или fake/stub dependency.
+- Если target-код делает локальный import внутри проверяемого symbol, не планируй patch target-модуля по локальному имени; планируй provider/import path как строковую цель patch/monkeypatch или локальный fake/stub.
 - `planner_json` используй по ролям: explicit_requirements/preserve_literals помогают выбрать наблюдаемое поведение; implementation_constraints помогают setup-у; suggested_reuse не является самостоятельным объектом проверки; forbidden_assumptions запрещают неподтвержденные ожидания. Если planner_json добавляет детали, которых нет в исходном запросе и target-коде, не превращай их в обязательные ожидания теста.
 - Планируй 1 небольшой pytest-файл с 1-3 тестами и простым setup.
 - Проверяй устойчивые свойства результата: тип, непустое значение, обязательный суффикс/префикс/ключ, наличие явно заданного литерала, факт вызова видимого helper-а или изменение видимого состояния.
@@ -28,17 +30,19 @@
 - Не расширяй общее требование вроде безопасной строки/пути до запрета Unicode, пробелов или исходных фрагментов текста, если пользователь явно этого не потребовал и target-код их сохраняет.
 - Для project models используй только видимые constructor fields и required fields. Значения начального состояния передавай через конструктор.
 - Не придумывай import path, поля, методы, аргументы конструктора и зависимости.
-- Для class method импортируй parent class как источник метода. Если target-код не использует `self`, планируй unbound-вызов через parent class с `None` для self и не создавай настоящий экземпляр parent class.
+- Для method-target импорт parent class допустим только как технический owner target-метода, а не как объект setup. Если target-код использует `self`, планируй прямой unbound-вызов exact target method: `ParentClass.target_method(fake_self, ...)` на локальном fake/stub self.
 - Если target-код использует только простые `self`-атрибуты или простые вызовы у них, планируй локальный fake/stub/`types.SimpleNamespace`, а не настоящий тяжелый parent instance.
-- Если для проверки method-target достаточно fake self, планируй unbound-вызов target-метода через parent class на подготовленном fake self. Не планируй создание настоящего экземпляра parent class.
+- Если для проверки method-target достаточно fake self, планируй локальный fake/stub self и прямой unbound-вызов exact target method: `ParentClass.target_method(fake_self, ...)`. Это разрешено только для проверяемого target method; другие project instance methods нельзя вызывать на class как helpers.
 - Не планируй обход конструктора parent class через `__new__`; fake self должен быть локальным stub/simple object, а не неполноценным экземпляром project class.
 - Если parent class нужен только как owner target-метода, не добавляй его в `must_use_symbols`; его можно импортировать как технический owner для прямого вызова target symbol.
 - Не добавляй optional pytest plugin fixtures в план. Если fixture не предоставлена явно видимым related test/project config и не является обычной встроенной pytest fixture, планируй monkeypatch/fake/stub без этой fixture.
 - Для UI/GUI/entrypoint-кода не открывай настоящее окно, не запускай event loop и не завершай процесс. Используй monkeypatch/fake/stub или статическую проверку, если этого достаточно.
 - Related tests и full-file context используй только как источник import/setup-паттернов, если они не противоречат сгенерированному target-коду.
 - В `must_use_symbols` включай только реально нужные видимые project symbols, чье поведение или данные тест должен использовать. Не включай suggested_reuse только потому, что он есть в planner_json; включай его только если сгенерированный target-код реально использует этот symbol и тесту нужен его публичный контракт.
-- Не добавляй parent class в `must_use_symbols` только потому, что он нужен как owner/import для вызова selfless method; target_symbol уже указывает проверяемый метод.
-- В `avoid` указывай только то, что тест действительно не должен создавать/импортировать/запускать.
+- Блок available/technical project imports ниже — это справка о допустимых import paths, а не список обязательных объектов теста. Не копируй symbols из этого блока в `must_use_symbols`, если тесту не нужен их публичный runtime-контракт.
+- Не добавляй parent class в `must_use_symbols` только потому, что он нужен как technical owner для unbound-вызова target method; target_symbol уже указывает проверяемый метод.
+- Не добавляй project storage/service class в `must_use_symbols`, если target-код вызывает его через `self.<dependency>` и тест может использовать fake/stub dependency с тем же методом.
+- В `avoid` указывай только то, что тест действительно не должен создавать/импортировать/запускать. Не добавляй в `avoid` стандартные типы или provider paths, которые нужны только для безопасной подмены внешнего вызова.
 - Все текстовые значения JSON пиши на русском языке.
 
 Параметры задачи:
@@ -69,3 +73,14 @@
 {contract_attribute_requirements_block}
 {related_tests_block}
 {reference_context_block}
+
+- Если target-код вызывает внешнюю зависимость через import внутри target symbol или через имя, не видимое на уровне project-модуля, планируй patch/fake исходного provider/import path или локальный fake/stub. Не планируй patch target-модуля по имени, которого нет среди module-level imports/definitions.
+
+- В `avoid` не записывай provider path, если он нужен только как строковая цель monkeypatch/patch для предотвращения реального внешнего вызова. Различай реальное использование API и безопасную подмену вызова.
+
+
+Финальная проверка плана generated test:
+- Не включай parent class в `must_use_symbols`, если он нужен только как owner для `ParentClass.target_method(fake_self, ...)`.
+- Не включай project storage/service class в `must_use_symbols`, если target-код получает его через `self.<dependency>` и тест может использовать fake/stub dependency.
+- Не планируй настоящий parent instance, QApplication/event loop или реальные storage/service/model methods, если target method проверяется через fake self.
+- Не добавляй в `avoid` provider path, который нужен только как строковая цель monkeypatch/patch для предотвращения реального внешнего вызова.

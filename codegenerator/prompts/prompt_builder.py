@@ -1602,6 +1602,8 @@ def _compact_change_request_for_codegen(
     planner_result: dict[str, Any] | None = None,
     *,
     forbidden_existing_symbol_names: set[str] | None = None,
+    include_planner_details: bool = True,
+    include_request_obligations: bool = True,
 ) -> str:
     title = str(change_request.get("title", "") or "").strip()
     description = str(change_request.get("description", "") or "").strip()
@@ -1631,17 +1633,20 @@ def _compact_change_request_for_codegen(
                 )
             )
         ]
+        seen_critical = {item.strip() for item in critical_constraints}
+        remaining_constraints = [item for item in constraints if item.strip() not in seen_critical]
         if critical_constraints:
             lines.append("Critical request constraints:")
             lines.extend(f"- {item}" for item in critical_constraints[:8])
-        lines.append("Request constraints:")
-        lines.extend(f"- {item}" for item in constraints[:16])
+        if remaining_constraints:
+            lines.append("Other request constraints:")
+            lines.extend(f"- {item}" for item in remaining_constraints[:12])
 
-    request_obligations = _render_request_output_obligations(change_request)
+    request_obligations = _render_request_output_obligations(change_request) if include_request_obligations else ""
     if request_obligations:
         lines.append(request_obligations)
 
-    if planner_result:
+    if planner_result and include_planner_details:
         filtered_planner = _filter_planner_result_for_insert_after(
             planner_result,
             user_text="\n".join(lines),
@@ -1935,7 +1940,7 @@ def build_test_planner_user_prompt(
         "reference_context_block": reference_context_block,
         "contract_context_block": contract_context_block,
         "contract_attribute_requirements_block": contract_attribute_block,
-        "required_imports_block": _render_optional_block("Required project imports", required_imports_text),
+        "required_imports_block": _render_optional_block("Available project imports for tests (technical hints, not must-use symbols)", required_imports_text),
         "model_surfaces_block": _render_optional_block("Visible constructor and field contracts for test data", _normalize_optional_value(model_surfaces_text)),
         "test_behavior_guidance_block": _render_optional_block(
             "Target-derived test data strategy",
@@ -2100,15 +2105,17 @@ def build_planner_user_prompt(
         if len(reference_text) > limits["reference"]:
             reference_text, _ = _truncate_text(reference_text, limits["reference"])
 
+    authoritative_coords = _authoritative_target_coordinates(request.target)
     values = {
         "request": compact_request_text,
-        "target_file": request.target.get("file_path", ""),
-        "target_symbol": request.target.get("qualname", ""),
-        "operation": request.target.get("operation", "replace_symbol"),
-        "insert_scope": request.target.get("insert_scope") or "module_body",
-        "expected_new_symbol_kind": request.target.get("expected_new_symbol_kind") or "",
-        "parent_qualname": request.target.get("parent_qualname") or "",
-        "insert_after": request.target.get("insert_after") or request.target.get("qualname", "") or "null",
+        "authoritative_target_coordinates_block": _render_authoritative_target_coordinates_block(authoritative_coords),
+        "target_file": authoritative_coords["target_file"],
+        "target_symbol": authoritative_coords["target_symbol"],
+        "operation": authoritative_coords["operation"],
+        "insert_scope": authoritative_coords["insert_scope"],
+        "expected_new_symbol_kind": authoritative_coords["expected_new_symbol_kind"],
+        "parent_qualname": authoritative_coords["parent_qualname"],
+        "insert_after": authoritative_coords["insert_after"],
         "reference_symbol": "null",
         "module_outline_block": _render_optional_block("Структура модуля", module_outline_text),
         "target_function_block": _render_optional_block("Целевой symbol / anchor", target_source),
@@ -2264,6 +2271,8 @@ def build_coder_user_prompt(
         request.change_request,
         effective_planner_result,
         forbidden_existing_symbol_names=forbidden_existing_symbol_names,
+        include_planner_details=False,
+        include_request_obligations=False,
     )
 
     target_limit = int(runtime_config.coder_prompt_target_chars or 0)
@@ -2294,6 +2303,15 @@ def build_coder_user_prompt(
     )
 
     planner_json_text = _pretty(effective_planner_result)
+    compact_target_contract_text, compact_target_contract_metrics = _render_compact_target_contract(
+        pc,
+        request.change_request or {},
+        planner_result=effective_planner_result,
+        include_type_sensitive_contracts=bool(getattr(runtime_config, "type_sensitive_contract_hints_enabled", False)),
+        max_chars=2200,
+    )
+    authoritative_coords = _authoritative_target_coordinates(request.target)
+    authoritative_target_coordinates_block = _render_authoritative_target_coordinates_block(authoritative_coords)
 
     def _section_sizes(
         *,
@@ -2341,15 +2359,14 @@ def build_coder_user_prompt(
                 "Required import_changes for names used by generated code",
                 required_codegen_import_changes_text,
             ),
-            operation=request.target.get("operation", "replace_symbol"),
-            insert_scope=request.target.get("insert_scope") or "module_body",
-            expected_new_symbol_kind=request.target.get("expected_new_symbol_kind") or "",
-            parent_qualname=request.target.get("parent_qualname") or "",
-            target_file=request.target.get("file_path", ""),
-            target_symbol=request.target.get("qualname", ""),
-            insert_after=request.target.get("insert_after")
-            or request.target.get("qualname", "")
-            or "null",
+            authoritative_target_coordinates_block=authoritative_target_coordinates_block,
+            operation=authoritative_coords["operation"],
+            insert_scope=authoritative_coords["insert_scope"],
+            expected_new_symbol_kind=authoritative_coords["expected_new_symbol_kind"],
+            parent_qualname=authoritative_coords["parent_qualname"],
+            target_file=authoritative_coords["target_file"],
+            target_symbol=authoritative_coords["target_symbol"],
+            insert_after=authoritative_coords["insert_after"],
             reference_symbol="null",
             planner_json=planner_json_text,
             request=request_value,
@@ -2376,6 +2393,10 @@ def build_coder_user_prompt(
             related_tests_block=_render_optional_block(
                 "Related tests",
                 _normalize_optional_value(related_tests_value),
+            ),
+            compact_target_contract_block=_render_optional_block(
+                "Краткий контракт текущей задачи",
+                compact_target_contract_text,
             ),
             contract_context_block=_render_optional_block(
                 "Связанные production-контракты",
@@ -2699,6 +2720,7 @@ def build_coder_user_prompt(
     metrics["coder_visible_implementation_facts_chars"] = int(
         coder_visible_facts_metrics.get("visible_implementation_facts_chars", 0) or 0
     )
+    metrics.update(compact_target_contract_metrics)
     metrics["coder_available_imports_chars"] = len(available_imports_text)
     metrics["coder_preservation_guidance_chars"] = len(preservation_guidance_text)
     metrics["coder_target_docstring_guidance_chars"] = len(target_docstring_guidance_text)
@@ -2795,6 +2817,27 @@ def _build_repair_syntax_error_block(
     return ""
 
 
+
+def _issue_severity(issue: dict[str, Any]) -> str:
+    return str(
+        issue.get("severity")
+        or issue.get("level")
+        or issue.get("status")
+        or ""
+    ).strip().lower()
+
+
+def _is_advisory_repair_issue(issue: dict[str, Any]) -> bool:
+    code = str(issue.get("code") or "").strip()
+    severity = _issue_severity(issue)
+    if severity in {"warning", "warn", "advisory", "info", "note"}:
+        return True
+    return code in {
+        "duplicated_import_change_with_local_import",
+        "unused_import_change",
+        "local_import_inside_target_symbol",
+    }
+
 def _build_repair_problem_block(
     error_context: dict[str, Any],
 ) -> str:
@@ -2813,6 +2856,8 @@ def _build_repair_problem_block(
         block_name = str(block.get("name") or "")
         details = block.get("details") or {}
         for issue in block.get("issues") or []:
+            if not isinstance(issue, dict) or _is_advisory_repair_issue(issue):
+                continue
             code = str(issue.get("code") or "")
             message = str(issue.get("message") or "")
             symbol = str(issue.get("symbol") or "")
@@ -2825,16 +2870,15 @@ def _build_repair_problem_block(
                 item["symbol"] = symbol
             if code == "contract_call_uses_unrequested_literal_arg":
                 item["repair_objective"] = (
-                    "Do not keep or replace the failing argument with another placeholder literal. "
-                    "Make the new symbol accept the required value as a parameter, reuse a local variable "
-                    "from visible context, or choose another visible contract."
+                    "Не сохраняй и не заменяй ошибочный аргумент другим placeholder literal. "
+                    "Передай нужное значение параметром нового symbol, переиспользуй видимую локальную переменную "
+                    "или выбери другой видимый контракт."
                 )
             elif code == "unknown_injected_dependency_method":
                 item["repair_objective"] = (
-                    "Do not keep or rename the invented dependency method. Use only methods of injected "
-                    "dependencies that are explicitly visible in target source, module/full file context, "
-                    "related symbols, or contract context. If no such method exists, choose a visible contract "
-                    "or make the required value an explicit parameter of the new symbol."
+                    "Не сохраняй и не переименовывай выдуманный dependency method. Используй только методы "
+                    "зависимостей, явно видимые в target, module/full-file context, related symbols или contract context. "
+                    "Если подходящего метода нет, выбери видимый контракт или передай нужное значение параметром нового symbol."
                 )
             elif code in {"unknown_self_attribute", "unknown_self_method", "unknown_injected_dependency_attribute"}:
                 self_details = details.get("self_attribute_usage_check") or {}
@@ -2844,10 +2888,10 @@ def _build_repair_problem_block(
                 unknown_attributes = self_details.get("unknown_attributes") or []
                 unknown_methods = self_details.get("unknown_methods") or []
                 item["repair_objective"] = (
-                    "Remove every use of the unknown self attribute or unknown self method from the repaired code. "
-                    "Use only visible_attributes or visible_methods. If suggested_replacements are provided, "
-                    "prefer them. Do not add a new alias, underscore field, or private helper call unless the "
-                    "requested operation explicitly asks to add that new method."
+                    "Полностью удали неизвестный self-атрибут или self-метод из repaired code. "
+                    "Используй только visible_attributes или visible_methods. Если есть suggested_replacements, "
+                    "предпочитай их. Не добавляй alias, underscore-field или private helper, если requested operation "
+                    "явно не просит добавить новый method/state."
                 )
                 item["visible_attributes"] = visible_attributes
                 item["visible_methods"] = visible_methods
@@ -2859,16 +2903,16 @@ def _build_repair_problem_block(
             elif code == "unknown_runtime_name":
                 runtime_details = details.get("runtime_name_check") or {}
                 item["repair_objective"] = (
-                    "If the name is required, add the missing import through import_changes. "
-                    "If an existing visible name can be used instead, replace the unknown name. "
-                    "Do not leave unresolved names in repaired production code."
+                    "Если имя нужно для реализации, добавь недостающий import через import_changes. "
+                    "Если можно использовать уже видимое имя, замени unknown name. "
+                    "Не оставляй unresolved names в repaired production code."
                 )
                 item["unknown_names"] = runtime_details.get("unknown_names") or []
             elif code == "unknown_model_constructor_keyword":
                 item["repair_objective"] = (
-                    "Keep the requested result/model object and fix the constructor call. "
-                    "Replace invented or alias keyword arguments with only the visible constructor fields "
-                    "listed in the diagnostic message. Do not replace the requested model/result object with dict."
+                    "Сохрани требуемый result/model object и исправь constructor call. "
+                    "Замени выдуманные или alias keyword arguments только на видимые constructor fields "
+                    "из diagnostics. Не заменяй требуемый model/result object на dict."
                 )
             elif code == "model_constructor_field_type_mismatch":
                 model_details = details.get("model_surface_usage_check") or {}
@@ -2879,8 +2923,8 @@ def _build_repair_problem_block(
                         entry["class_name"] = checked_call.get("class_name")
                         mismatches.append(entry)
                 item["repair_objective"] = (
-                    "Before constructing the project model, convert serialized values to the visible field types. "
-                    "Do not pass raw JSON/dict/file/service values into non-primitive model fields."
+                    "Перед созданием project model преобразуй serialized values к видимым типам полей. "
+                    "Не передавай сырые JSON/dict/file/service values в non-primitive model fields."
                 )
                 item["field_type_mismatches"] = mismatches[:5]
             problems.append(item)
@@ -3046,7 +3090,23 @@ def build_repair_user_prompt(
         request.error_context or {},
     )
     repair_scope_text = _repair_scope_from_error_context(request.error_context or {})
+    compact_target_contract_text, compact_target_contract_metrics = _render_compact_target_contract(
+        project_context,
+        change_request,
+        planner_result={},
+        error_context=request.error_context or {},
+        previous_artifact=previous_artifact,
+        include_type_sensitive_contracts=bool(getattr(runtime_config, "type_sensitive_contract_hints_enabled", False)),
+        max_chars=2200,
+    )
 # ***********************
+    authoritative_coords = _authoritative_target_coordinates_from_previous(
+        request.target,
+        previous_artifact,
+        operation=requested_operation,
+    )
+    authoritative_target_coordinates_block = _render_authoritative_target_coordinates_block(authoritative_coords)
+
     has_local_syntax_error = bool(syntax_error_block)
     has_previous_code = bool(previous_code)
 # ***********************
@@ -3054,17 +3114,27 @@ def build_repair_user_prompt(
         module_outline_text = ""
 
     values = {
-        "requested_operation": requested_operation,
-        "target_file": previous_artifact.get("target_file", ""),
-        "target_symbol": previous_artifact.get(
-            "target_qualname",
-            previous_artifact.get("target_symbol", ""),
-        ),
-        "insert_after": previous_artifact.get("insert_after") or "null",
-        "request": _compact_change_request_for_codegen(change_request, None) or "repair request",
+        "authoritative_target_coordinates_block": authoritative_target_coordinates_block,
+        "requested_operation": authoritative_coords["operation"],
+        "target_file": authoritative_coords["target_file"],
+        "target_symbol": authoritative_coords["target_symbol"],
+        "target_qualname": authoritative_coords["target_qualname"],
+        "insert_scope": authoritative_coords["insert_scope"],
+        "expected_new_symbol_kind": authoritative_coords["expected_new_symbol_kind"],
+        "parent_qualname": authoritative_coords["parent_qualname"],
+        "insert_after": authoritative_coords["insert_after"],
+        "request": _compact_change_request_for_codegen(
+            change_request,
+            None,
+            include_request_obligations=False,
+        ) or "repair request",
         "repair_problem_block": repair_problem_block,
         "repair_scope_block": _render_optional_block("Область repair", repair_scope_text),
         "preservation_guidance_block": repair_preservation_guidance_block,
+        "compact_target_contract_block": _render_optional_block(
+            "Краткий контракт текущей задачи",
+            compact_target_contract_text,
+        ),
         "available_imports_block": _render_optional_block(
             "Доступные imports и имена целевого файла",
             available_imports_text,
@@ -3224,11 +3294,366 @@ def _render_available_imports(project_context: dict[str, Any], *, max_items: int
     return "\n".join(rendered)
 
 
+
+def _iter_allowed_api_dependencies(project_context: dict[str, Any]) -> list[dict[str, Any]]:
+    surface = project_context.get("allowed_api_surface") or project_context.get("allowed_calls") or {}
+    if not isinstance(surface, dict):
+        return []
+    dependencies = surface.get("dependencies") or []
+    return [item for item in dependencies if isinstance(item, dict)]
+
+
+def _target_short_name_from_project_context(project_context: dict[str, Any]) -> str:
+    target = project_context.get("target_symbol") or project_context.get("target_function") or {}
+    qualname = str(target.get("qualname") or target.get("name") or "").strip()
+    return qualname.rsplit(".", 1)[-1] if qualname else ""
+
+
+def _compact_request_summary(change_request: dict[str, Any], *, max_chars: int = 500) -> str:
+    if not isinstance(change_request, dict):
+        return ""
+    parts: list[str] = []
+    title = str(change_request.get("title") or "").strip()
+    description = str(change_request.get("description") or "").strip()
+    if title:
+        parts.append(f"Title: {title}")
+    if description:
+        parts.append(description)
+    constraints = change_request.get("constraints") or []
+    if isinstance(constraints, str):
+        constraints = [constraints]
+    constraint_lines = [str(item).strip() for item in constraints if str(item).strip()]
+    if constraint_lines:
+        parts.append("Constraints: " + "; ".join(constraint_lines[:6]))
+    text = "\n".join(parts).strip()
+    if max_chars > 0 and len(text) > max_chars:
+        text, _ = _truncate_text(text, max_chars)
+    return text
+
+
+
+def _metadata_value(value: Any) -> str:
+    text = str(value or "").strip()
+    return text or "null"
+
+
+def _canonical_requested_operation(value: Any) -> str:
+    text = str(value or "replace_symbol").strip() or "replace_symbol"
+    return "insert_after_symbol" if text == "insert_after_symbol" else "replace_symbol"
+
+
+def _insert_after_for_operation(target: dict[str, Any], operation: str) -> str:
+    if _canonical_requested_operation(operation) != "insert_after_symbol":
+        return "null"
+    return _metadata_value(target.get("insert_after") or target.get("qualname"))
+
+
+def _target_qualname_from_target(target: dict[str, Any], fallback: Any = None) -> str:
+    return _metadata_value(target.get("qualname") or target.get("target_qualname") or fallback)
+
+
+def _authoritative_target_coordinates(target: dict[str, Any], *, operation: Any | None = None) -> dict[str, str]:
+    target = target or {}
+    op = _canonical_requested_operation(operation if operation is not None else target.get("operation"))
+    return {
+        "operation": op,
+        "target_file": _metadata_value(target.get("file_path") or target.get("target_file")),
+        "target_symbol": _target_qualname_from_target(target),
+        "target_qualname": _target_qualname_from_target(target),
+        "insert_scope": _metadata_value(target.get("insert_scope")),
+        "expected_new_symbol_kind": _metadata_value(target.get("expected_new_symbol_kind")),
+        "parent_qualname": _metadata_value(target.get("parent_qualname")),
+        "insert_after": _insert_after_for_operation(target, op),
+    }
+
+
+def _authoritative_target_coordinates_from_previous(
+    target: dict[str, Any],
+    previous_artifact: dict[str, Any],
+    *,
+    operation: Any | None = None,
+) -> dict[str, str]:
+    target = target or {}
+    previous_artifact = previous_artifact or {}
+    merged = {
+        "file_path": target.get("file_path") or previous_artifact.get("target_file"),
+        "qualname": target.get("qualname") or previous_artifact.get("target_qualname") or previous_artifact.get("target_symbol"),
+        "operation": operation if operation is not None else previous_artifact.get("operation") or target.get("operation"),
+        "insert_scope": target.get("insert_scope") or previous_artifact.get("insert_scope"),
+        "expected_new_symbol_kind": target.get("expected_new_symbol_kind") or previous_artifact.get("expected_new_symbol_kind"),
+        "parent_qualname": target.get("parent_qualname") or previous_artifact.get("parent_qualname"),
+        "insert_after": previous_artifact.get("insert_after") or target.get("insert_after"),
+    }
+    return _authoritative_target_coordinates(merged, operation=merged.get("operation"))
+
+
+def _render_authoritative_target_coordinates_block(coords: dict[str, str]) -> str:
+    lines = [
+        "Authoritative target coordinates:",
+        f"- operation: {coords.get('operation', 'null')}",
+        f"- target_file: {coords.get('target_file', 'null')}",
+        f"- target_symbol: {coords.get('target_symbol', 'null')}",
+        f"- target_qualname: {coords.get('target_qualname', 'null')}",
+        f"- insert_scope: {coords.get('insert_scope', 'null')}",
+        f"- expected_new_symbol_kind: {coords.get('expected_new_symbol_kind', 'null')}",
+        f"- parent_qualname: {coords.get('parent_qualname', 'null')}",
+        f"- insert_after: {coords.get('insert_after', 'null')}",
+        "Copy these coordinates exactly into code artifacts. For replace_symbol, insert_after must stay null.",
+    ]
+    return "\n".join(lines)
+
+
+def _iter_text_values(value: Any) -> list[str]:
+    texts: list[str] = []
+    if isinstance(value, str):
+        if value.strip():
+            texts.append(value)
+    elif isinstance(value, dict):
+        for item in value.values():
+            texts.extend(_iter_text_values(item))
+    elif isinstance(value, list):
+        for item in value:
+            texts.extend(_iter_text_values(item))
+    return texts
+
+
+def _iter_error_issue_texts(error_context: dict[str, Any] | None) -> list[str]:
+    """Return only user/actionable diagnostics, not bulky checker internals.
+
+    verification_summary.details may contain the entire known contract registry.
+    Feeding that back into the compact type-sensitive selector makes unrelated
+    contracts look referenced and can hide the actual failing contract behind
+    the short display limit.
+    """
+    error_context = error_context or {}
+    texts: list[str] = []
+
+    def add_issue(issue: Any) -> None:
+        if not isinstance(issue, dict):
+            return
+        for key in ("code", "symbol", "message"):
+            value = str(issue.get(key) or "").strip()
+            if value:
+                texts.append(value)
+
+    summary = error_context.get("verification_summary") or {}
+    if isinstance(summary, dict):
+        for block in summary.get("failed_blocks") or summary.get("blocks") or []:
+            if isinstance(block, dict):
+                for issue in block.get("issues") or []:
+                    add_issue(issue)
+
+    for issue in error_context.get("diagnostics") or []:
+        add_issue(issue)
+    for issue in error_context.get("issues") or []:
+        add_issue(issue)
+
+    summary_text = error_context.get("summary")
+    if isinstance(summary_text, str) and summary_text.strip():
+        texts.append(summary_text.strip())
+    return texts
+
+
+def _collect_type_sensitive_reference_texts(
+    *,
+    planner_result: dict[str, Any] | None = None,
+    error_context: dict[str, Any] | None = None,
+    previous_artifact: dict[str, Any] | None = None,
+) -> str:
+    texts: list[str] = []
+    planner_result = planner_result or {}
+    for key in ("implementation_constraints", "suggested_reuse", "required_changes", "allowed_calls_to_use"):
+        texts.extend(_iter_text_values(planner_result.get(key)))
+
+    texts.extend(_iter_error_issue_texts(error_context))
+
+    previous_artifact = previous_artifact or {}
+    code = str(previous_artifact.get("code") or "")
+    if code.strip():
+        texts.append(code)
+    return "\n".join(texts)
+
+
+def _signature_is_type_sensitive(signature: str) -> bool:
+    text = str(signature or "")
+    markers = (
+        "Path",
+        "PathLike",
+        "datetime",
+        "date",
+        "UUID",
+        "Decimal",
+        "Enum",
+        "list[",
+        "List[",
+        "dict[",
+        "Dict[",
+        "tuple[",
+        "Tuple[",
+        "Optional[",
+        "Union[",
+        "Note",
+        "SearchResult",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _contract_call_referenced(access_path: str, name: str, haystack: str) -> bool:
+    if not haystack:
+        return False
+    full = f"{access_path}.{name}" if access_path else name
+    return full in haystack or re.search(rf"\b{re.escape(name)}\s*\(", haystack) is not None
+
+def _render_compact_target_contract(
+    project_context: dict[str, Any],
+    change_request: dict[str, Any],
+    *,
+    planner_result: dict[str, Any] | None = None,
+    error_context: dict[str, Any] | None = None,
+    previous_artifact: dict[str, Any] | None = None,
+    include_type_sensitive_contracts: bool = False,
+    max_chars: int = 2200,
+) -> tuple[str, dict[str, Any]]:
+    """Render a concise, generic contract summary before noisy project context.
+
+    The block is derived from the same project_context that already feeds the full
+    prompt. It does not invent project-specific rules and does not validate code;
+    it only highlights target, visible access paths, callable contracts, visible
+    state and compact diagnostics in a model-friendly order.
+    """
+    project_context = project_context or {}
+    target = project_context.get("target_symbol") or project_context.get("target_function") or {}
+    target_qualname = str(target.get("qualname") or target.get("name") or "").strip()
+    target_file = str(target.get("file_path") or project_context.get("target_file") or "").strip()
+    target_name = target_qualname.rsplit(".", 1)[-1] if target_qualname else _target_short_name_from_project_context(project_context)
+
+    dependencies = _iter_allowed_api_dependencies(project_context)
+    type_sensitive_reference_text = _collect_type_sensitive_reference_texts(
+        planner_result=planner_result,
+        error_context=error_context,
+        previous_artifact=previous_artifact,
+    )
+    instance_state: list[str] = []
+    dependency_call_items: list[tuple[int, int, str]] = []
+    type_sensitive: list[str] = []
+    call_index = 0
+    for dep in dependencies:
+        access_path = str(dep.get("access_path") or "").strip()
+        type_name = str(dep.get("type_name") or "").strip()
+        if access_path and access_path.startswith("self.") and access_path not in instance_state:
+            instance_state.append(access_path + (f" ({type_name})" if type_name else ""))
+        for method in dep.get("allowed_methods") or []:
+            if not isinstance(method, dict):
+                continue
+            name = str(method.get("name") or "").strip()
+            signature = str(method.get("signature") or "").strip()
+            if not access_path or not name:
+                continue
+            call_line = f"{access_path}.{name}"
+            if signature:
+                call_line += f" — {signature}"
+            referenced = _contract_call_referenced(access_path, name, type_sensitive_reference_text)
+            dependency_call_items.append((0 if referenced else 1, call_index, call_line))
+            call_index += 1
+            if (
+                include_type_sensitive_contracts
+                and referenced
+                and _signature_is_type_sensitive(signature)
+            ):
+                if len(type_sensitive) < 5:
+                    type_sensitive.append(call_line)
+
+    dependency_calls = [line for _, _, line in sorted(dependency_call_items)[:10]]
+
+    model_surfaces = project_context.get("model_surfaces") or project_context.get("visible_model_surfaces") or []
+    visible_models: list[str] = []
+    if isinstance(model_surfaces, list):
+        for model in model_surfaces[:6]:
+            if not isinstance(model, dict):
+                continue
+            name = str(model.get("name") or model.get("qualname") or "").strip()
+            fields = [str(item) for item in (model.get("fields") or []) if str(item).strip()]
+            required = [str(item) for item in (model.get("required_constructor_fields") or []) if str(item).strip()]
+            if name:
+                line = name
+                if fields:
+                    line += f" fields={fields[:8]}"
+                if required:
+                    line += f" required={required[:6]}"
+                visible_models.append(line)
+
+    planner_result = planner_result or {}
+    explicit = [str(item).strip() for item in (planner_result.get("explicit_requirements") or []) if str(item).strip()]
+    constraints = [str(item).strip() for item in (planner_result.get("implementation_constraints") or []) if str(item).strip()]
+    forbidden = [str(item).strip() for item in (planner_result.get("forbidden_assumptions") or []) if str(item).strip()]
+
+    repair_issues: list[str] = []
+    summary = (error_context or {}).get("verification_summary") or {}
+    for block in summary.get("failed_blocks") or []:
+        for issue in (block.get("issues") or [])[:5]:
+            if not isinstance(issue, dict) or _is_advisory_repair_issue(issue):
+                continue
+            code = str(issue.get("code") or "").strip()
+            symbol = str(issue.get("symbol") or "").strip()
+            message = str(issue.get("message") or "").strip()
+            compact = code
+            if symbol:
+                compact += f" @ {symbol}"
+            if message:
+                compact += ": " + message.replace("\n", " ")[:260]
+            repair_issues.append(compact)
+            if len(repair_issues) >= 6:
+                break
+        if len(repair_issues) >= 6:
+            break
+
+    lines: list[str] = []
+    lines.append("Это краткий контракт текущей задачи. Он приоритетнее шумного справочного контекста ниже, но не заменяет пользовательский запрос.")
+    if target_qualname:
+        lines.append(f"Target: {target_qualname}" + (f" ({target_file})" if target_file else ""))
+    request_summary = _compact_request_summary(change_request)
+    if request_summary:
+        lines.append("Запрос пользователя: " + request_summary.replace("\n", " | "))
+    if explicit:
+        lines.append("Наблюдаемые требования planner-а: " + "; ".join(explicit[:6]))
+    if constraints:
+        lines.append("Технические ограничения применения: " + "; ".join(constraints[:8]))
+    if instance_state:
+        lines.append("Видимое состояние/зависимости экземпляра: " + ", ".join(instance_state[:12]))
+    if dependency_calls:
+        lines.append("Видимые dependency/project calls: " + " | ".join(dependency_calls[:8]))
+    if type_sensitive:
+        lines.append("Type-sensitive project calls: " + " | ".join(type_sensitive[:5]))
+    if visible_models:
+        lines.append("Видимые модели/result objects: " + " | ".join(visible_models[:4]))
+    if forbidden:
+        lines.append("Нельзя предполагать: " + "; ".join(forbidden[:6]))
+    if repair_issues:
+        lines.append("Критические diagnostics для repair: " + " | ".join(repair_issues))
+    if target_name:
+        lines.append(
+            "Не придумывай alias-имена для видимых self-зависимостей и состояния; если нужен project call, "
+            "используй точный видимый access path и сигнатуру из этого блока."
+        )
+    text = "\n".join(lines).strip()
+    original_chars = len(text)
+    if max_chars > 0 and len(text) > max_chars:
+        text, _ = _truncate_text(text, max_chars)
+    return text, {
+        "compact_target_contract_chars": len(text),
+        "compact_target_contract_original_chars": original_chars,
+        "compact_target_contract_dependency_calls": len(dependency_calls),
+        "compact_target_contract_type_sensitive_calls": len(type_sensitive),
+        "compact_target_contract_repair_issues": len(repair_issues),
+    }
+
 def _repair_scope_from_error_context(error_context: dict[str, Any]) -> str:
     summary = (error_context or {}).get("verification_summary") or {}
     codes: list[str] = []
     for block in summary.get("failed_blocks") or []:
         for issue in block.get("issues") or []:
+            if not isinstance(issue, dict) or _is_advisory_repair_issue(issue):
+                continue
             code = str(issue.get("code") or "").strip()
             if code:
                 codes.append(code)
@@ -4563,7 +4988,7 @@ def _build_test_prompt_values(
         test_plan_text,
     )
     required_imports_block = _render_optional_block(
-        "Required project imports",
+        "Available project imports for tests (technical hints, not must-use symbols)",
         required_imports_text,
     )
     model_surfaces_block = _render_optional_block(
@@ -5269,16 +5694,22 @@ def build_repair_planner_user_prompt(
     module_outline_block = _render_optional_block("Структура модуля", module_outline_text)
     compact_request = _compact_change_request_for_codegen(change_request)
 
+    authoritative_coords = _authoritative_target_coordinates_from_previous(
+        request.target,
+        previous_artifact,
+        operation=requested_operation,
+    )
+
     values = {
-        "requested_operation": str(requested_operation or ""),
-        "target_file": str(request.target.get("file_path") or previous_artifact.get("target_file") or ""),
-        "target_symbol": str(
-            request.target.get("qualname")
-            or previous_artifact.get("target_qualname")
-            or previous_artifact.get("target_symbol")
-            or ""
-        ),
-        "insert_after": str(previous_artifact.get("insert_after") or previous_artifact.get("target_qualname") or ""),
+        "authoritative_target_coordinates_block": _render_authoritative_target_coordinates_block(authoritative_coords),
+        "requested_operation": authoritative_coords["operation"],
+        "target_file": authoritative_coords["target_file"],
+        "target_symbol": authoritative_coords["target_symbol"],
+        "target_qualname": authoritative_coords["target_qualname"],
+        "insert_scope": authoritative_coords["insert_scope"],
+        "expected_new_symbol_kind": authoritative_coords["expected_new_symbol_kind"],
+        "parent_qualname": authoritative_coords["parent_qualname"],
+        "insert_after": authoritative_coords["insert_after"],
         "request": compact_request,
         "repair_problem_block": repair_problem_block,
         "previous_code_block": previous_code_block,

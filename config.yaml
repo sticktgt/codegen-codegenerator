@@ -44,6 +44,7 @@ codegenerator:
     coder_max_full_file_chars: 20000
     coder_max_contract_symbols: 8
     coder_max_contract_symbol_chars: 1800
+    type_sensitive_contract_hints_enabled: false
     repair_prompt_hard_limit: 42000
     repair_max_reference_chars: 1600
     repair_max_contract_symbols: 8

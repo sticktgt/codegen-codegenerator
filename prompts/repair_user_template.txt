@@ -83,19 +83,31 @@
 - Если локальная синтаксическая ошибка вызвана unexpected indent в decorated method, минимальное исправление — выровнять decorator и def/async def, не меняя смысл метода и anchor.
 - Если целевая правка уже почти корректна, сделай минимальное исправление.
 - Минимальное исправление не должно оставлять исходную critical issue нерешенной. После локальной правки перечитай весь code и проверь, что все critical issues из repair request исчезли и не появились новые неизвестные self-атрибуты, receivers, imports или нарушения сигнатур.
+- Исправляй только перечисленные critical issues и необходимые следствия этих исправлений. Не добавляй новые UI-вызовы, state changes, helper calls или dependency calls, если они не требуются исходным запросом, diagnostics или repair planner required_changes.
+- Если repair planner перечислил `required_changes`, итоговый code должен реализовать их напрямую и не должен добавлять неподтвержденные дополнительные изменения «для надежности».
 - Если новый class должен быть dataclass, исправь это напрямую.
 - Если запрос просит только модель данных, не добавляй лишнюю логику.
 - Reference context используй только как вторичный ориентир по стилю.
 - Всегда возвращай import_changes как JSON-массив; если новые imports не нужны, верни [].
+- Каждый элемент import_changes должен быть JSON-объектом, а не строкой с Python-import.
+  Допустимые формы:
+  {{"action": "add_import", "module": "package.module"}}
+  {{"action": "add_import", "module": "package.module", "alias": "alias_name"}}
+  {{"action": "add_from_import", "module": "package.module", "names": ["Name"]}}
+  {{"action": "remove_import", "module": "package.module"}}
+  {{"action": "remove_from_import", "module": "package.module", "names": ["Name"]}}
+- Не возвращай import_changes вида ["from package.module import Name"] или ["import package.module"]; это строка, а не structured artifact contract.
 - Не добавляй import-строки внутрь поля code: все новые imports описывай через import_changes.
+- Не оставляй локальные imports в repaired code, даже если они уже были в previous artifact. Если имя нужно итоговому code, перенеси его в `import_changes`; если не нужно — убери.
 - Итоговый repaired code должен быть самодостаточным относительно imports: каждое external/module-level имя должно быть уже доступно в целевом файле или добавлено через import_changes ответа.
 - При repair не теряй корректный import из previous artifact, если соответствующее имя осталось в итоговом repaired code и не доступно иначе.
-- Форма import_changes должна соответствовать форме использования имени в code; не добавляй неиспользуемые imports и не дублируй один и тот же import на уровне файла и внутри function/method body.
+- Форма import_changes должна соответствовать форме использования имени в code; не добавляй неиспользуемые imports. Если одно и то же имя есть и в import_changes, и локально внутри function/method body, правильная чистка — сохранить/добавить module-level import_changes и убрать локальный import из code, а не удалять import_changes для имени, которое остается использованным.
 - Не вводи новые import aliases без явной причины из исходного файла, пользовательского запроса или подтвержденного контекста.
-- Если диагностика требует удалить лишний import, используй remove_import/remove_from_import только для imports, видимых в исходном файле.
+- Используй remove_import/remove_from_import только для imports, видимых в исходном файле и реально не нужных итоговому code. Advisory diagnostics про duplicated/local import не является причиной удалять module-level import_changes, если имя остается использованным.
 - Если создаешь проектную модель, DTO, dataclass-like объект или result-object, используй только явно видимые constructor fields / keyword names из model surfaces, source excerpt или сигнатуры `__init__`. Не заменяй их близкими по смыслу alias-именами и не переименовывай аргументы из пользовательского запроса.
 - Если исходный запрос или предыдущий artifact явно требует вернуть или создать конкретный result/model object, repair не должен заменять этот объект на словарь. Исправляй import_changes и constructor keywords так, чтобы остался требуемый result/model object.
 - Если ошибка проверки указывает на нарушение сигнатуры или типа аргумента project/production contract, исправь именно вызов по видимой сигнатуре. Выполни безопасное стандартное преобразование значения к ожидаемому типу или верни отказ, если преобразование нельзя подтвердить контекстом.
+- `allowed_methods` означает callable methods, а не writable fields. Не исправляй unknown attribute путем присваивания в `self.<dependency>.<method_name>`; если диагностика показывает видимый owner attribute, используй owner access path `self.<attr>`.
 - Если в контексте есть Required production contract calls, исправленный code обязан вызвать эти production-контракты; не заменяй их ручной реализацией бизнес-логики.
 
 - Если передан блок Contract attribute requirements, используй его только как дополнительный структурный контекст о полях моделей и контрактов; не добавляй новые поля и не подменяй явно видимые поля alias-именами.
@@ -104,13 +116,20 @@
 - Если ошибка проверки указывает на дубликат symbol или повтор существующего метода/функции, не возвращай этот же symbol повторно: создай новый symbol с уникальным именем, соответствующим исходному пользовательскому запросу.
 
 Параметры задачи:
-- requested_operation: {requested_operation}
-- target_file: {target_file}
-- target_symbol: {target_symbol}
-- insert_after: {insert_after}
+{authoritative_target_coordinates_block}
 
-{repair_scope_block}{available_imports_block}{preservation_guidance_block}{repair_problem_block}{required_repair_import_changes_block}{syntax_error_block}
+{repair_scope_block}{available_imports_block}{preservation_guidance_block}{repair_problem_block}{compact_target_contract_block}{required_repair_import_changes_block}{syntax_error_block}
+
 Справочный контекст проекта ниже может содержать старое или частично устаревшее поведение. Используй его для совместимости, сигнатур, импортов и стиля, но не как источник новых требований к поведению.
 
 {previous_code_block}{target_function_block}{contract_context_block}{required_contracts_block}{required_class_members_block}{contract_attribute_requirements_block}{module_outline_block}{full_file_source_block}{reference_context_block}
+
+Финальный artifact contract для repair:
+- Исправь только перечисленные critical issues и не добавляй новые state fields, helper calls, UI calls или project dependency calls без требования diagnostics/запроса.
+- Если предыдущий `code` содержит локальный import внутри target symbol, удали его из `code` и перенеси import в `import_changes`, если это имя действительно нужно. Не исправляй duplicated/local import через remove_import/remove_from_import, когда итоговый code продолжает использовать это имя.
+- Поле `code` после repair не должно содержать строк `import ...` или `from ... import ...` внутри target symbol.
+- Если итоговый `code` использует короткое имя `Name`, вводи его через `add_from_import`, а не через `add_import` с alias; `alias` в `add_import` является alias модуля, а не импортом class/function short name.
+- Если repair связан с типом аргумента видимого contract, исправь фактическое значение перед вызовом contract; не меняй receiver, contract method или состояние owner-а без прямой причины из diagnostics.
+- Не возвращай artifact, который исправляет одну ошибку, но добавляет новое неизвестное имя, self-атрибут, local import или неподтвержденный вызов.
+
 

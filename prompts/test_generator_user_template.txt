@@ -28,19 +28,24 @@
 - Тест должен быть самодостаточным: все используемые имена импортированы, определены локально или являются builtin.
 - Главный источник поведения — сгенерированный target-код ниже и исходный запрос пользователя.
 - Тест обязан вызывать проверяемый target symbol напрямую. Не создавай локальную функцию, метод или wrapper, которые повторяют тело target-кода вместо его вызова.
-- Для method-target с fake/self вызывай метод через parent class или bound object на подготовленном self; fake/stub должны быть только окружением target-вызова, а не копией target-логики.
+- Перед выбором monkeypatch/patch target сначала проверь, где имя реально разрешается в сгенерированном target-коде: module-level binding, imported provider path, local import внутри target symbol или fake/stub dependency.
+- Если target-код делает локальный import внутри проверяемого symbol, imported name является локальным только во время выполнения symbol; не патчь его как `target_module.ImportedName`. Для предотвращения реального внешнего вызова используй строковый provider/import path или fake/stub окружение.
+- Для method-target с `self` вызывай exact target method через unbound-вызов на подготовленном fake/stub self: `ParentClass.target_method(fake_self, ...)`; fake/stub должны быть только окружением target-вызова, а не копией target-логики.
 - `planner_json` используй по ролям: explicit_requirements/preserve_literals помогают выбрать наблюдаемое поведение; implementation_constraints помогают setup-у; suggested_reuse не тестируй само по себе; forbidden_assumptions не нарушай. Неподтвержденные детали из planner_json или документации не превращай в обязательные assert-ы.
 - Проверяй устойчивые свойства результата: тип, непустое значение, обязательный суффикс/префикс/ключ/литерал, наличие явно заданной даты или id, факт вызова видимого helper-а, изменение видимого состояния.
 - Не воспроизводи внутренний алгоритм target-кода, helper-а, dependency method или production contract вручную в assert. Для составных строк, путей, id, структур, сериализованных данных и других вычисляемых результатов получай expected value через тот же видимый production API либо проверяй только устойчивые свойства, прямо следующие из пользовательского запроса: тип, непустоту, принадлежность нужной области, обязательный литерал/суффикс/ключ, факт вызова helper-а или изменение видимого состояния. Не проверяй вручную промежуточные компоненты составного результата и не делай exact equality со всем составным результатом, если точное значение не задано пользователем явно, не является публичным контрактом и не получено через видимый production API.
 - Не добавляй отрицательные assert-ы против Unicode, пробелов или исходных фрагментов текста, если пользователь явно этого не требовал и target-код их сохраняет.
 - Для project models используй только видимые constructor fields. Не присваивай начальные поля после создания объекта, если их можно передать в конструктор.
 - Не придумывай import path, поля, методы, аргументы конструктора и зависимости.
-- Для class method импортируй parent class. Если target-код не использует `self`, вызывай метод как `ParentClass.method(None, ...)` и не создавай экземпляр parent class.
+- Для method-target импортируй parent class только как technical owner target-метода. Если target-код не использует `self`, можно вызвать `ParentClass.method(None, ...)`; если target-код использует `self`, используй прямой unbound-вызов exact target method: `ParentClass.target_method(fake_self, ...)` на подготовленном fake/stub self.
 - Если parent class указан только как owner/import для вызова метода, это не означает, что нужно создавать его экземпляр.
 - Если target-код использует только простые `self`-атрибуты или простые вызовы у них, используй локальный fake/stub/`types.SimpleNamespace`, а не настоящий тяжелый parent instance.
-- Если target-derived guidance или `test_plan.avoid` говорят не создавать настоящий parent/project object, используй parent class только для unbound-вызова target-метода на fake self. Общий паттерн: подготовить fake self с нужными атрибутами и вызвать `ParentClass.target_method(fake_self, ...)`. Не вызывай `ParentClass()`.
+- Если target-derived guidance или `test_plan.avoid` говорят не создавать настоящий parent/project object, используй parent class только как owner exact target method. Общий паттерн: `fake_self = types.SimpleNamespace(...)`, затем `ParentClass.target_method(fake_self, ...)`. Не вызывай `ParentClass()` и не применяй такой class-level вызов к другим project instance methods.
 - Не используй `ParentClass.__new__(ParentClass)` как замену fake self. Это обход конструктора project class, а не простой stub. Подготовь локальный fake self через `types.SimpleNamespace`, `object()` с присвоенными атрибутами или маленький локальный fake class без наследования от parent class.
-- Если `test_plan.must_use_symbols` содержит parent class, но parent class нужен только как owner target-метода, это не разрешение создавать реальный экземпляр parent class. Используй этот symbol только для прямого вызова target-метода.
+- Если `test_plan.must_use_symbols` содержит parent class, но parent class нужен только как owner target-метода, это не разрешение создавать реальный экземпляр parent class. Используй этот symbol только для прямого unbound-вызова exact target method на fake self.
+- Блок available/technical project imports ниже — это справка о допустимых import paths, а не список объектов, которые нужно создать, вызвать или добавить в setup. Импортируй только то, что действительно нужно для прямого вызова target symbol или для построения видимых test data.
+- Если в technical imports есть project storage/service/model class, но target-код работает с ним через `self.<dependency>`, не создавай настоящий экземпляр этого class и не вызывай его методы ради setup. Используй fake/stub dependency с теми же вызываемыми методами и видимыми return fields.
+- Для method-target с простым `self`-состоянием предпочитай явный шаблон: `fake_self = types.SimpleNamespace(...)`, затем `ParentClass.target_method(fake_self, ...)`. Не заменяй этот шаблон на `ParentClass()` только потому, что parent class доступен в import hints, и не используй class-level вызовы для других project methods.
 - Не добавляй аргументы тестовой функции для optional pytest plugin fixtures, если такие fixture не видны в related tests/project config. Для UI/GUI code используй monkeypatch/fake/stub без plugin fixture и без запуска event loop.
 - Если `test_plan.avoid` запрещает optional pytest plugin fixtures, любая неизвестная fixture в сигнатуре теста является ошибкой генерации теста; перепиши setup через встроенные pytest fixtures или локальные fake/stub объекты.
 - Если target-код вызывает методы зависимостей из `self.<dependency>`, а тест проверяет поведение target-а, создай минимальный fake dependency с теми же вызываемыми методами и возвращаемыми видимыми полями. Не создавай настоящий project dependency, не используй файловую систему и не вызывай реальные storage/service/model методы только ради setup, если target можно проверить через fake/stub.
@@ -81,3 +86,18 @@
 {related_tests_block}
 {reference_context_block}
 {full_file_source_block}
+
+- Когда тест подменяет внешний вызов из target-кода, patch/monkeypatch target должен совпадать с местом, где имя реально разрешается. Не патчь `target_module.SomeName...`, если `SomeName` не импортирован или не определен на уровне этого модуля.
+
+- Если target-код делает локальный import внутри проверяемого symbol, не пытайся патчить локальное имя через target module. Используй provider/import path как строковую цель monkeypatch/patch либо подмени окружение через fake/stub так, чтобы реальный внешний вызов не выполнялся.
+
+- Если `test_plan.avoid` запрещает реальное использование внешнего API, это не запрещает использовать его dotted provider path как строковую цель monkeypatch/patch, если такая подмена нужна, чтобы не вызвать реальный API.
+
+
+Финальная проверка generated test перед ответом:
+- Если проверяемый symbol — method-target и target-код использует `self`, тест должен вызывать exact target method как `ParentClass.target_method(fake_self, ...)` на локальном fake/stub self; не создавай `ParentClass()` и не запускай UI/application/event loop.
+- Используй top-level pytest-функции; не добавляй неизвестные fixture-аргументы. `self` не должен быть аргументом top-level test function.
+- Если target-код вызывает `self.<dependency>.<method>`, подготовь fake/stub dependency с этим методом и нужным return object; не создавай настоящий storage/service/controller только ради setup.
+- Для project model/data object используй только видимые constructor fields и видимые методы. Не вызывай методы, которых нет в visible method list, даже если они кажутся типичными для сериализации, времени или фабрики.
+- Если test_plan.must_use_symbols или technical imports конфликтуют с fake-self стратегией, считай их import hints, а не разрешением создавать реальные project objects.
+- Верни только JSON с ключами `test_file` и `code`; `code` должен проходить `ast.parse`.

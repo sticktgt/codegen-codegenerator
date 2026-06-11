@@ -33,6 +33,9 @@
 - Для project dependencies и внутренних project contracts используй только явно видимые access path, method names, поля и сигнатуры из контекста. Не придумывай новые dependency methods, поля, import path или способы доступа по смыслу запроса.
 - Для вызова project dependency используй точный receiver/access path из Allowed API Surface или явно видимого target/full-file контекста. Не создавай новый self-атрибут по имени типа, класса, модуля или смыслу запроса.
 - Если видимый contract показан как method dependency access path, вызывай его через этот access path, а не через class/type name, если только контекст явно не показывает static/classmethod-вызов.
+- `allowed_methods` в контексте означает список вызываемых методов. Имя из `allowed_methods` не является writable attribute: не присваивай `self.<dependency>.<method_name> = ...` и не используй method name как поле модели.
+- Если пользователь просит сбросить флаг или состояние текущего owner/class, сначала ищи видимый атрибут на самом `self`. Не переноси это состояние на dependency/model только из-за похожего имени метода или поля.
+- Если видимый owner attribute и dependency method имеют похожие имена, различай их по access path и роли: owner state меняется через `self.<attr>`, dependency method вызывается как функция и не используется как место присваивания.
 - Ограничения видимого project API не запрещают стандартную библиотеку Python и обычные операции явно видимых стандартных типов, если они нужны задаче и не добавляют внешних зависимостей.
 - Если в контексте есть обязательные production contract calls, сгенерированный code обязан вызвать эти contracts и не должен вручную повторять их бизнес-логику.
 - Перед вызовом видимого helper/dependency/production contract проверь фактические аргументы по видимой сигнатуре. Если локальное значение имеет другой тип представления, выполни безопасное стандартное преобразование к ожидаемому типу или верни отказ, если преобразование нельзя подтвердить контекстом.
@@ -42,7 +45,16 @@
 
 Imports:
 - Всегда возвращай import_changes как JSON-массив; если новые imports не нужны, верни [].
+- Каждый элемент import_changes должен быть JSON-объектом, а не строкой с Python-import.
+  Допустимые формы:
+  {{"action": "add_import", "module": "package.module"}}
+  {{"action": "add_import", "module": "package.module", "alias": "alias_name"}}
+  {{"action": "add_from_import", "module": "package.module", "names": ["Name"]}}
+  {{"action": "remove_import", "module": "package.module"}}
+  {{"action": "remove_from_import", "module": "package.module", "names": ["Name"]}}
+- Не возвращай import_changes вида ["from package.module import Name"] или ["import package.module"]; это строка, а не structured artifact contract.
 - Не добавляй import-строки внутрь поля code: все новые imports описывай через import_changes.
+- Это правило действует и для primary generation: даже если имя нужно только внутри одного метода, не добавляй локальный import в тело target symbol; верни module-level import через `import_changes`.
 - Каждое external/module-level имя, которое используется в code, должно быть уже доступно в целевом файле или добавлено через import_changes. Не добавляй imports, которые не используются итоговым code.
 - Форма import_changes должна соответствовать форме использования имени в code. Не вводи новые import aliases без явной причины из исходного файла, пользовательского запроса или подтвержденного контекста.
 - Если имя уже доступно в целевом файле через import, guarded import, assignment, class/function definition или блок доступных imports, не добавляй повторный import_changes.
@@ -125,13 +137,7 @@ Models and result objects:
 {required_codegen_import_changes_block}
 
 Параметры задачи:
-- operation: {operation}
-- insert_scope: {insert_scope}
-- expected_new_symbol_kind: {expected_new_symbol_kind}
-- parent_qualname: {parent_qualname}
-- target_file: {target_file}
-- target_symbol: {target_symbol}
-- insert_after: {insert_after}
+{authoritative_target_coordinates_block}
 - reference_symbol: {reference_symbol}
 
 Planner result для текущего target:
@@ -139,5 +145,16 @@ Planner result для текущего target:
 {planner_json}
 Справочный контекст проекта ниже может содержать старое или частично устаревшее поведение. Используй его для совместимости, сигнатур, импортов и стиля, но не как источник новых требований к поведению.
 
-{available_imports_block}{preservation_guidance_block}
+{available_imports_block}{preservation_guidance_block}{compact_target_contract_block}
+
 {module_outline_block}{target_docstring_block}{target_function_block}{contract_context_block}{full_file_source_block}{related_tests_block}{reference_function_block}
+
+Финальный artifact contract перед ответом:
+- Поле `code` должно содержать только изменяемый symbol, без локальных `import ...` и `from ... import ...` внутри тела symbol.
+- Все новые runtime-имена, используемые в `code`, должны быть доступны через исходный модуль или через `import_changes`.
+- Если имя используется в `code` как короткое имя, `import_changes` должен вводить именно это короткое имя; не рассчитывай, что импорт родительского модуля создаст вложенное имя.
+- Если в целевом файле уже есть `from package.module import ExistingName`, а итоговый `code` использует другое короткое имя из того же подтвержденного module, расширяй этот module через `add_from_import` с нужным коротким именем; не используй локальный import и не используй `add_import` родительского module для короткого имени.
+- Перед каждым dependency/project call сверь фактические аргументы с видимой сигнатурой и сделай нужные стандартные/видимые преобразования до вызова.
+- Не возвращай artifact, который заведомо потребует repair только из-за import placement, неизвестного runtime-имени или несоответствия типа аргумента видимого contract.
+
+

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+
+import pytest
 from dataclasses import asdict
 
 from codegenerator.config import load_config
@@ -405,9 +407,9 @@ def test_test_generation_prompts_include_required_project_imports_from_model_sur
     )
 
     expected_import = 'from note.note_search import SearchResult, build_context_fragment, find_match_positions'
-    assert 'Required project imports' in planner_prompt
+    assert 'Available project imports for tests (technical hints, not must-use symbols)' in planner_prompt
     assert expected_import in planner_prompt
-    assert 'Required project imports' in generator_prompt
+    assert 'Available project imports for tests (technical hints, not must-use symbols)' in generator_prompt
     assert expected_import in generator_prompt
     assert 'Не создавай экземпляр project class через `__new__`' in generator_prompt
     assert 'Не вызывай методы project object, которых нет' in generator_prompt
@@ -1761,7 +1763,7 @@ def test_test_generator_prompt_keeps_required_imports_for_regular_function() -> 
         },
     )
 
-    assert 'Required project imports' in prompt
+    assert 'Available project imports for tests (technical hints, not must-use symbols)' in prompt
     assert 'support_app.services.ticket_service' in prompt
     assert 'Target-код содержит блок запуска модуля при прямом выполнении файла' not in prompt
 
@@ -2037,3 +2039,190 @@ def test_test_generator_prompt_guides_runtime_clock_expected_values() -> None:
     assert 'между временем до вызова и временем после вызова' in prompt
     assert 'clock/current time' not in prompt
 
+
+
+def test_parse_code_response_converts_import_statement_strings_to_structured_import_changes() -> None:
+    from codegenerator.generation.coder import parse_code_response
+
+    payload = (
+        '{'
+        '"target_file":"editor/editor_window.py",'
+        '"operation":"replace_symbol",'
+        '"code":"def open_note(self):\\n    pass\\n",'
+        '"import_changes":["from PyQt5.QtWidgets import QFileDialog", "import pathlib as pl"]'
+        '}'
+    )
+
+    parsed = parse_code_response(payload)
+
+    assert parsed['import_changes'] == [
+        {'action': 'add_from_import', 'module': 'PyQt5.QtWidgets', 'names': ['QFileDialog']},
+        {'action': 'add_import', 'module': 'pathlib', 'alias': 'pl'},
+    ]
+
+
+def test_parse_code_response_rejects_non_import_string_import_changes() -> None:
+    from codegenerator.generation.coder import parse_code_response
+
+    payload = (
+        '{'
+        '"target_file":"editor/editor_window.py",'
+        '"operation":"replace_symbol",'
+        '"code":"def open_note(self):\\n    pass\\n",'
+        '"import_changes":["QFileDialog"]'
+        '}'
+    )
+
+    with pytest.raises(ValueError, match='import_changes string entries'):
+        parse_code_response(payload)
+
+
+def test_parse_repair_response_converts_import_statement_strings_to_structured_import_changes() -> None:
+    from codegenerator.generation.repair import parse_repair_response
+
+    payload = (
+        '{'
+        '"target_file":"editor/editor_window.py",'
+        '"operation":"replace_symbol",'
+        '"code":"def open_note(self):\\n    pass\\n",'
+        '"import_changes":["from pathlib import Path"]'
+        '}'
+    )
+
+    parsed = parse_repair_response(payload)
+
+    assert parsed['import_changes'] == [
+        {'action': 'add_from_import', 'module': 'pathlib', 'names': ['Path']},
+    ]
+
+
+def test_artifact_metadata_trace_reports_raw_parsed_effective_drift() -> None:
+    from codegenerator.orchestration.generation_service import _artifact_metadata_trace_payload
+
+    raw_content = '''{
+      "operation": "replace_symbol",
+      "target_file": "pkg/mod.py",
+      "target_symbol": "pkg.mod.Owner.method",
+      "target_qualname": "pkg.mod.Owner.method",
+      "insert_scope": "module_body",
+      "expected_new_symbol_kind": "function",
+      "parent_qualname": null,
+      "import_changes": ["from pathlib import Path"]
+    }'''
+    parsed = {
+        "operation": "replace_symbol",
+        "target_file": "pkg/mod.py",
+        "target_symbol": "pkg.mod.Owner.method",
+        "target_qualname": "pkg.mod.Owner.method",
+        "insert_scope": "module_body",
+        "expected_new_symbol_kind": "function",
+        "parent_qualname": None,
+        "import_changes": [{"action": "add_from_import", "module": "pathlib", "names": ["Path"]}],
+    }
+    effective = {
+        **parsed,
+        "insert_scope": "class_body",
+        "expected_new_symbol_kind": "method",
+    }
+
+    payload = _artifact_metadata_trace_payload(
+        raw_content=raw_content,
+        parsed_artifact=parsed,
+        effective_artifact=effective,
+    )
+
+    assert payload["has_metadata_drift"] is True
+    drift_fields = {item["field"] for item in payload["metadata_drift"]}
+    assert "import_changes" in drift_fields
+    assert "insert_scope" in drift_fields
+    assert payload["raw_model_artifact_metadata"]["insert_scope"] == "module_body"
+    assert payload["effective_artifact_metadata"]["insert_scope"] == "class_body"
+
+
+def test_parse_code_response_converts_named_add_import_to_from_import() -> None:
+    from codegenerator.generation.coder import parse_code_response
+
+    payload = (
+        '{'
+        '"target_file":"editor/editor_window.py",'
+        '"operation":"replace_symbol",'
+        '"code":"def open_note(self):\\n    pass\\n",'
+        '"import_changes":[{"action":"add_import","module":"pathlib","names":["Path"]},'
+        '{"action":"remove_import","module":"PyQt5.QtWidgets","names":["QFileDialog"]}]'
+        '}'
+    )
+
+    parsed = parse_code_response(payload)
+
+    assert parsed['import_changes'] == [
+        {'action': 'add_from_import', 'module': 'pathlib', 'names': ['Path']},
+        {'action': 'remove_from_import', 'module': 'PyQt5.QtWidgets', 'names': ['QFileDialog']},
+    ]
+
+
+def test_repair_prompt_excludes_advisory_import_duplicates_from_critical_block() -> None:
+    from codegenerator.models.requests import RepairRequest
+    from codegenerator.prompts.prompt_builder import build_repair_user_prompt
+
+    template = Path('prompts/repair_user_template.txt').read_text(encoding='utf-8')
+    config = load_config('config.yaml')
+    request = RepairRequest(
+        request_id='repair-filter-advisory',
+        mode='repair',
+        previous_generation_request_id='generate-filter-advisory',
+        change_request={
+            'title': 'Открытие заметки',
+            'description': 'Загрузить файл заметки и показать текст.',
+            'constraints': [],
+            'notes': [],
+        },
+        error_context={
+            'verification_summary': {
+                'failed_blocks': [
+                    {
+                        'name': 'patch_static_semantics',
+                        'issues': [
+                            {
+                                'code': 'contract_call_argument_type_mismatch',
+                                'message': 'str passed where Path is expected',
+                                'symbol': 'editor.editor_window.EditorWindow.open_note',
+                            },
+                            {
+                                'code': 'duplicated_import_change_with_local_import',
+                                'message': 'advisory duplicate import only',
+                                'symbol': 'editor.editor_window.EditorWindow.open_note',
+                                'severity': 'warning',
+                            },
+                        ],
+                    }
+                ]
+            }
+        },
+        previous_artifact={
+            'operation': 'replace_symbol',
+            'target_file': 'editor/editor_window.py',
+            'target_qualname': 'editor.editor_window.EditorWindow.open_note',
+            'code': 'def open_note(self):\n    from pathlib import Path\n    self.storage.load_from_file(path)\n',
+        },
+        project_context={
+            'target_symbol': {
+                'qualname': 'editor.editor_window.EditorWindow.open_note',
+                'name': 'open_note',
+                'kind': 'method',
+                'source': 'def open_note(self):\n    pass\n',
+            },
+            'contract_context': {'related_symbols': []},
+            'module_outline': [],
+        },
+        target={'file_path': 'editor/editor_window.py', 'qualname': 'editor.editor_window.EditorWindow.open_note'},
+    )
+
+    prompt = build_repair_user_prompt(template, request, runtime_config=config)
+
+    critical_start = prompt.find('Критическая ошибка для repair')
+    assert critical_start != -1
+    critical_end = prompt.find('Краткий контракт текущей задачи', critical_start)
+    critical_block = prompt[critical_start:critical_end]
+    assert 'contract_call_argument_type_mismatch' in critical_block
+    assert 'duplicated_import_change_with_local_import' not in critical_block
+    assert 'не является причиной удалять module-level import_changes' in prompt

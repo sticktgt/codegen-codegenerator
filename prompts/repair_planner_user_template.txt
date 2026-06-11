@@ -41,16 +41,15 @@
 - Если ошибка указывает на неверные keyword-аргументы конструктора проектной модели/result-object, планируй исправление этих keyword-аргументов по видимым constructor fields. Не планируй замену требуемого result/model object на словарь.
 - Если ошибка содержит `unknown_runtime_name`, план repair должен либо добавить недостающий import, либо заменить имя на уже видимое имя из контекста.
 - Если неизвестное runtime-имя соответствует явно видимому проектному symbol, связанному symbol, проектному контракту или явно указанной пользователем сущности с подтвержденным модулем, планируй добавление import_changes для этого существующего symbol. Если модуль не подтвержден контекстом, не придумывай путь импорта.
+- В allowed_calls_to_use и required_changes не записывай Python import statements вроде `from module import Name` или `import module`; imports не являются вызовами и не являются текстом code. Если repair требует нового import, пиши required_changes как structured import_changes object, например {{"action": "add_from_import", "module": "package.module", "names": ["Name"]}}. Если подтвержденного module нет в видимом контексте или diagnostics, не придумывай import path.
+- Advisory diagnostics про дублирование import_changes и локального import не являются critical issue: не планируй удаление module-level import_changes для имени, которое остается использованным в code. Если нужно чистить такой дубль, правильное направление — убрать локальный import из code и сохранить import_changes.
 - allowed_calls_to_use перечисляй только из Allowed API Surface, production contracts или явно видимого контекста.
 - forbidden_calls перечисляй из error context и из любых неразрешенных вызовов.
 - required_changes должны быть конкретными и короткими.
 - Все текстовые значения пиши на русском языке.
 
 Параметры задачи:
-- requested_operation: {requested_operation}
-- target_file: {target_file}
-- target_symbol: {target_symbol}
-- insert_after: {insert_after}
+{authoritative_target_coordinates_block}
 
 {repair_problem_block}
 

@@ -25,6 +25,7 @@ from codegenerator.models.requests import GenerationRequest, RepairRequest
 from codegenerator.models.results import GenerationResult
 from codegenerator.parsing.json_utils import parse_json_object
 from codegenerator.prompts.review_prompt_builder import GeneratedTestFailureReviewPromptBuilder
+from codegenerator.prompts.generated_test_repair_prompt_builder import GeneratedTestRepairPromptBuilder
 from codegenerator.prompts.prompt_builder import (
     build_coder_user_prompt,
     build_planner_user_prompt,
@@ -58,6 +59,70 @@ def _add_step(trace: dict[str, Any], step: str, payload: dict[str, Any]) -> None
     trace["steps"].append({"step": step, "payload": payload})
 
 
+_ARTIFACT_METADATA_FIELDS = (
+    "operation",
+    "target_file",
+    "target_symbol",
+    "target_qualname",
+    "insert_after",
+    "insert_scope",
+    "expected_new_symbol_kind",
+    "parent_qualname",
+)
+
+
+def _artifact_metadata_view(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    result = {field: value.get(field) for field in _ARTIFACT_METADATA_FIELDS if field in value}
+    if "import_changes" in value:
+        import_changes = value.get("import_changes")
+        result["import_changes"] = import_changes
+        result["import_changes_type"] = type(import_changes).__name__
+        if isinstance(import_changes, list):
+            result["import_changes_item_types"] = [type(item).__name__ for item in import_changes]
+    return result
+
+
+def _artifact_metadata_trace_payload(
+    *,
+    raw_content: str | None,
+    parsed_artifact: Any,
+    effective_artifact: Any | None = None,
+) -> dict[str, Any]:
+    raw_object: Any = None
+    raw_parse_error: str | None = None
+    if raw_content:
+        try:
+            raw_object = parse_json_object(raw_content)
+        except Exception as exc:  # pragma: no cover - trace helper must not affect generation
+            raw_parse_error = str(exc)
+
+    raw_metadata = _artifact_metadata_view(raw_object)
+    parsed_metadata = _artifact_metadata_view(parsed_artifact)
+    effective_metadata = _artifact_metadata_view(effective_artifact if effective_artifact is not None else parsed_artifact)
+
+    drift: list[dict[str, Any]] = []
+    for field in sorted(set(raw_metadata) | set(parsed_metadata) | set(effective_metadata)):
+        raw_value = raw_metadata.get(field)
+        parsed_value = parsed_metadata.get(field)
+        effective_value = effective_metadata.get(field)
+        if raw_value != parsed_value or parsed_value != effective_value:
+            drift.append({
+                "field": field,
+                "raw_value": raw_value,
+                "parsed_value": parsed_value,
+                "effective_value": effective_value,
+            })
+
+    return {
+        "raw_model_artifact_metadata": raw_metadata,
+        "parsed_artifact_metadata": parsed_metadata,
+        "effective_artifact_metadata": effective_metadata,
+        "metadata_drift": drift,
+        "has_metadata_drift": bool(drift),
+        "raw_metadata_parse_error": raw_parse_error,
+    }
 
 
 def _warning_messages_from_format_warnings(value: Any) -> list[str]:
@@ -518,7 +583,7 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
             config.prompt_budget.generate_chars_limit,
         )
 
-        code_result, _, _ = _call_llm_with_trace(
+        code_result, raw_code_response, _ = _call_llm_with_trace(
             trace=trace,
             trace_step="coder",
             error_step="coder_error",
@@ -534,12 +599,25 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
             extra_payload={"context_metrics": coder_context_metrics},
         )
 
+        parsed_code_result = dict(code_result) if isinstance(code_result, dict) else code_result
         code_result = _canonicalize_code_result_for_request(
             code_result,
             request.target.get("operation"),
             request.target.get("qualname"),
             request.target,
-        )        
+        )
+        metadata_payload = _artifact_metadata_trace_payload(
+            raw_content=getattr(raw_code_response, "content", None),
+            parsed_artifact=parsed_code_result,
+            effective_artifact=code_result,
+        )
+        _add_step(trace, "coder_artifact_metadata", metadata_payload)
+        if metadata_payload.get("has_metadata_drift"):
+            logger.warning(
+                "coder artifact metadata drift request_id=%s drift=%s",
+                request.request_id,
+                metadata_payload.get("metadata_drift"),
+            )
 
         code_artifact = CodeArtifact(
             operation=code_result["operation"],
@@ -1069,7 +1147,7 @@ def repair(request: RepairRequest, config_path: str) -> GenerationResult:
             config.models.repair_model,
         )
 
-        repair_result, _, _ = _call_llm_with_trace(
+        repair_result, raw_repair_response, _ = _call_llm_with_trace(
             trace=trace,
             trace_step="repair",
             error_step="repair_error",
@@ -1085,6 +1163,7 @@ def repair(request: RepairRequest, config_path: str) -> GenerationResult:
             extra_payload={"context_metrics": request_dict.get("context_metrics", {})},
         )
 
+        parsed_repair_result = dict(repair_result) if isinstance(repair_result, dict) else repair_result
         repair_result = _canonicalize_code_result_for_request(
             repair_result,
             requested_operation,
@@ -1093,6 +1172,18 @@ def repair(request: RepairRequest, config_path: str) -> GenerationResult:
             or request.previous_artifact.get("target_symbol"),
             request.previous_artifact,
         )
+        metadata_payload = _artifact_metadata_trace_payload(
+            raw_content=getattr(raw_repair_response, "content", None),
+            parsed_artifact=parsed_repair_result,
+            effective_artifact=repair_result,
+        )
+        _add_step(trace, "repair_artifact_metadata", metadata_payload)
+        if metadata_payload.get("has_metadata_drift"):
+            logger.warning(
+                "repair artifact metadata drift request_id=%s drift=%s",
+                request.request_id,
+                metadata_payload.get("metadata_drift"),
+            )
 
         code_artifact = CodeArtifact(
             operation=repair_result["operation"],
@@ -1137,7 +1228,7 @@ def repair(request: RepairRequest, config_path: str) -> GenerationResult:
 
 
 
-_REVIEW_LIST_FIELDS = {'reasons', 'production_risks', 'test_issues', 'next_steps'}
+_REVIEW_LIST_FIELDS = {'reasons', 'production_risks', 'test_issues', 'next_steps', 'generated_test_repair_instructions', 'generated_test_repair_risks'}
 _REVIEW_ALLOWED_VERDICTS = {
     'production_likely_ok_test_likely_bad',
     'production_likely_bad_test_valid',
@@ -1152,6 +1243,18 @@ _REVIEW_ALLOWED_ACTIONS = {
     'manual_review',
     'rerun_test_generation',
 }
+_REVIEW_ALLOWED_REPAIRABILITY = {'repairable', 'maybe_repairable', 'not_repairable', 'not_needed'}
+_REVIEW_ALLOWED_REPAIR_KINDS = {
+    'bad_setup_heavy_parent_instance',
+    'wrong_import_or_patch_target',
+    'over_specific_assert',
+    'manual_oracle_for_composite_result',
+    'wrong_model_constructor_usage',
+    'environment_only',
+    'schema_or_json_format_error',
+    'unknown',
+}
+
 
 def _as_review_list(value: Any) -> list[Any]:
     if value is None:
@@ -1233,6 +1336,10 @@ def _normalize_generated_test_review(review: Any) -> dict[str, Any]:
             'test_issues': [],
             'recommendation_summary': 'Review недоступен: модель вернула не объектный JSON.',
             'next_steps': ['Повторить review или проверить production/test вручную.'],
+            'generated_test_repairability': 'not_repairable',
+            'generated_test_repair_kind': 'unknown',
+            'generated_test_repair_instructions': [],
+            'generated_test_repair_risks': ['Review недоступен: модель вернула не объектный JSON.'],
         }
 
     normalized = dict(review)
@@ -1305,6 +1412,21 @@ def _normalize_generated_test_review(review: Any) -> dict[str, Any]:
     normalized['should_keep_production_code'] = keep
     normalized['recommended_action'] = action
 
+    repairability = str(normalized.get('generated_test_repairability') or '').strip()
+    if repairability not in _REVIEW_ALLOWED_REPAIRABILITY:
+        if production_risks:
+            repairability = 'not_repairable'
+        elif test_issues and action in {'keep_production_code_exclude_test', 'rerun_test_generation'}:
+            repairability = 'maybe_repairable'
+        else:
+            repairability = 'not_needed'
+    normalized['generated_test_repairability'] = repairability
+
+    repair_kind = str(normalized.get('generated_test_repair_kind') or '').strip()
+    if repair_kind not in _REVIEW_ALLOWED_REPAIR_KINDS:
+        repair_kind = 'unknown'
+    normalized['generated_test_repair_kind'] = repair_kind
+
     for field in ('production_code_quality', 'generated_test_quality', 'recommendation_summary'):
         normalized[field] = str(normalized.get(field) or '')
     if not normalized.get('recommendation_summary'):
@@ -1328,6 +1450,95 @@ def _normalize_generated_test_review(review: Any) -> dict[str, Any]:
     return normalized
 
 
+
+def repair_generated_test(request: dict[str, Any], config_path: str) -> dict[str, Any]:
+    """Repair a generated pytest file after generated-test review.
+
+    This is intentionally separate from production-code generate/repair. It must
+    return only a test artifact and must not modify production code.
+    """
+    config = load_config(config_path)
+    prompts = load_prompts(config)
+    client = create_client(config)
+    request_id = str(request.get('request_id') or 'repair-generated-test')
+    trace = _base_trace(request_id, 'repair_generated_test')
+    trace_path = build_trace_path(config.trace.output_dir, request_id)
+    try:
+        generated_test = request.get('generated_test') or {}
+        expected_test_file = str(
+            generated_test.get('file_path')
+            or request.get('generated_test_file')
+            or ''
+        ).strip()
+        if not expected_test_file:
+            raise ValueError('repair generated test request is missing generated_test.file_path')
+
+        template = prompts.get('generated_test_repair_user_template') or ''
+        builder = GeneratedTestRepairPromptBuilder(template)
+        user_prompt, metrics = builder.build(request)
+        _log_prompt_size(
+            request_id=request_id,
+            step='repair_generated_test',
+            user_prompt=user_prompt,
+            system_prompt=prompts['system_rules'],
+            total_prompt_limit=config.prompt_budget.generate_test_chars_limit,
+        )
+        _enforce_prompt_limit(
+            'repair_generated_test',
+            user_prompt,
+            prompts['system_rules'],
+            config.prompt_budget.generate_test_chars_limit,
+        )
+        parsed, _raw, _meta = _call_llm_with_trace(
+            trace=trace,
+            trace_step='repair_generated_test',
+            error_step='repair_generated_test_error',
+            request_id=request_id,
+            client=client,
+            model=config.models.test_repair_model,
+            system_prompt=prompts['system_rules'],
+            user_prompt=user_prompt,
+            think=config.ollama.think,
+            config=config,
+            step_name_for_gateway='repair_generated_test',
+            parser=lambda content: parse_test_response(content, expected_test_file),
+            extra_payload={'prompt_metrics': metrics},
+        )
+        warnings = _warning_messages_from_format_warnings(parsed.get('format_warnings'))
+        test_artifact = TestArtifact(
+            file_path=parsed['test_file'],
+            source_code=parsed['code'],
+        )
+        result_payload = {
+            'request_id': request_id,
+            'status': 'ok',
+            'test_artifact': test_artifact.to_dict(),
+            'warnings': warnings,
+            'trace_path': str(trace_path),
+            'llm_usage': trace.get('llm_usage') or {},
+            'error_type': None,
+            'message': None,
+        }
+        trace['result'] = result_payload
+        if config.trace.save_to_file:
+            trace_path.parent.mkdir(parents=True, exist_ok=True)
+            trace_path.write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding='utf-8')
+        return result_payload
+    except Exception as exc:
+        logger.exception('repair_generated_test failed')
+        trace['error'] = {'type': type(exc).__name__, 'message': str(exc)}
+        if config.trace.save_to_file:
+            trace_path.parent.mkdir(parents=True, exist_ok=True)
+            trace_path.write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding='utf-8')
+        return {
+            'request_id': request_id,
+            'status': 'error',
+            'test_artifact': None,
+            'trace_path': str(trace_path),
+            'llm_usage': trace.get('llm_usage') or {},
+            'error_type': type(exc).__name__,
+            'message': str(exc),
+        }
 
 def review_generated_test_failure(request: dict[str, Any], config_path: str) -> dict[str, Any]:
     config = load_config(config_path)

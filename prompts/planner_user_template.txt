@@ -20,6 +20,25 @@
 
 JSON должен содержать только перечисленные поля верхнего уровня. Не добавляй поля `code`, `import_changes`, `test_file`, `source_code`, `target_qualname`, `insert_after` или другие поля code artifact.
 
+Верни объект строго по этой форме. Даже если значение неизвестно или не требуется, ключ всё равно должен присутствовать: используй null для nullable-полей и [] для списков.
+{{
+  "operation": "replace_symbol | insert_after_symbol",
+  "target_file": "...",
+  "target_symbol": "...",
+  "intent_summary": "...",
+  "constraints": [],
+  "reference_symbol": null,
+  "insert_scope": "module_body | class_body | null",
+  "expected_new_symbol_kind": null,
+  "parent_qualname": null,
+  "explicit_requirements": [],
+  "implementation_constraints": [],
+  "suggested_reuse": [],
+  "forbidden_assumptions": [],
+  "preserve_literals": []
+}}
+Не пропускай `explicit_requirements`, `reference_symbol`, `insert_scope`, `expected_new_symbol_kind` или `parent_qualname`.
+
 Приоритет исходного пользовательского запроса.
 Выполни требования из блока ниже. Справочный код, документация, комментарии, примеры, related symbols, related tests, reference artifacts, reuse hints и planner wording нужны для понимания проекта, сигнатур, импортов, стиля и допустимых API.
 Если справочный контекст противоречит исходному пользовательскому запросу, приоритет имеет исходный пользовательский запрос.
@@ -30,6 +49,7 @@ JSON должен содержать только перечисленные п�
 Правила:
 - Если исходный запрос шире видимого project API, выбери самый узкий безопасный видимый контракт и добавь необходимые параметры в новый symbol, либо верни status="not_enough_context".
 - Планируй вызовы project dependencies и внутренних project contracts только по явно видимым access path, method names и сигнатурам. Ограничения project API не запрещают стандартную библиотеку Python и обычные операции явно видимых стандартных типов.
+- Если dependency contract виден как `self.<dependency>.<method>`, в implementation_constraints и suggested_reuse указывай именно этот access path. Не записывай class/type-level form вроде `SomeStorage.load(...)` как required call, если видимый контракт является instance/dependency method.
 - Если у текущего класса или параметра явно виден стандартный тип Python, планируй использование его обычных операций и методов вместо выдумывания нового проектного helper-метода.
 - Если в контексте есть Required production contract calls, планируй обязательный вызов этих production-контрактов в новом code; не заменяй их ручной реализацией бизнес-логики.
 - Если видимый production contract принимает обязательный параметр, планируй этот параметр в сигнатуре нового symbol или бери его из явно видимого local context; не планируй placeholder literal.
@@ -65,13 +85,7 @@ JSON должен содержать только перечисленные п�
 - Если пользователь просит изменить текст, строку, формат или поведение, не сохраняй старое значение из текущего кода как preserve_literals.
 
 Входные данные:
-Operation: {operation}
-Insert scope: {insert_scope}
-Expected new symbol kind: {expected_new_symbol_kind}
-Parent qualname: {parent_qualname}
-Target file: {target_file}
-Target symbol: {target_symbol}
-Insert after: {insert_after}
+{authoritative_target_coordinates_block}
 Reference symbol: {reference_symbol}
 
 Справочный контекст проекта ниже может содержать старое или частично устаревшее поведение. Используй его для совместимости, сигнатур, импортов и стиля, но не как источник новых требований к поведению.

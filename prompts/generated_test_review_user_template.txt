@@ -21,6 +21,10 @@
 - test_issues
 - recommendation_summary
 - next_steps
+- generated_test_repairability
+- generated_test_repair_kind
+- generated_test_repair_instructions
+- generated_test_repair_risks
 
 Допустимые значения verdict:
 - production_likely_ok_test_likely_bad
@@ -40,6 +44,21 @@
 - manual_review
 - rerun_test_generation
 
+Допустимые значения generated_test_repairability:
+- repairable
+- maybe_repairable
+- not_repairable
+- not_needed
+
+Допустимые значения generated_test_repair_kind:
+- bad_setup_heavy_parent_instance
+- wrong_import_or_patch_target
+- over_specific_assert
+- manual_oracle_for_composite_result
+- wrong_model_constructor_usage
+- environment_only
+- schema_or_json_format_error
+- unknown
 
 Правила:
 - Не принимай окончательное решение за пользователя. Дай краткую рекомендацию для ручного review.
@@ -53,7 +72,19 @@
 - Если production_risks содержит существенный риск, не возвращай `production_likely_ok_test_likely_bad`, `production_code_quality="good"`, `should_keep_production_code="yes"` или `keep_production_code_exclude_test`.
 - Если production_risks содержит runtime/API/import/name/attribute/method/contract error, верни `production_likely_bad_test_valid` или `both_uncertain`, выставь `production_code_quality` как `bad` или `uncertain`, а `should_keep_production_code` как `no` или `manual_review`. Не называй generated test главной проблемой, если traceback или static diagnostics указывают на ошибку production-кода.
 - Если generated test проверяет наблюдаемое требование, прямо указанное в исходном пользовательском запросе или explicit_requirements, не считай такой assert ошибкой теста без явного доказательства, что production-код реализует это требование другим корректным способом. Если тест проверяет только suggested_reuse, считай это проблемой теста, если symbol не является обязательным и не входит в наблюдаемый результат.
+- Если production checks прошли и основная проблема в generated test, оцени, можно ли автоматически исправить generated test без изменения production-кода. Заполни generated_test_repairability, generated_test_repair_kind, generated_test_repair_instructions и generated_test_repair_risks.
+- Используй generated_test_repairability="repairable", если ошибка теста локальная и исправляется изменением setup, patch target, constructor args, слишком точных assert-ов или ручного oracle без новой информации о production-коде.
+- Если production checks прошли, а generated test падает из-за создания настоящего parent/application/window/controller/service объекта, тяжелого конструктора, framework runtime, event loop, UI/runtime инициализации или похожего setup, считай тест repairable или maybe_repairable, если проверяемый target method можно вызвать через fake/minimal self, stub, monkeypatch или локальный fake dependency без изменения production-кода. Для такого случая обычно используй generated_test_repair_kind="bad_setup_heavy_parent_instance".
+- Не используй generated_test_repairability="not_repairable" только потому, что текущий тест зависит от framework/runtime окружения. Если эту зависимость можно убрать заменой setup теста на fake/stub/monkeypatch, выбери "repairable" или "maybe_repairable".
+- Используй generated_test_repair_kind="environment_only" только если проблема действительно сводится к отсутствующему внешнему окружению, пакету или pytest plugin и не исправляется переписыванием самого generated test setup. Если тест сам создает лишний тяжелый объект или использует optional plugin fixture без необходимости, это проблема теста, а не чистая environment-only проблема.
+- Используй generated_test_repairability="maybe_repairable", если repair возможен, но не хватает части контекста или есть риск неоднозначности setup.
+- Используй generated_test_repairability="not_repairable", если ошибка теста неотделима от production-risk, зависит от окружения так, что ее нельзя убрать переписыванием теста, требует нового project contract или требует ручного решения пользователя.
+- Используй generated_test_repairability="not_needed", если generated test не требует исправления или review не про ошибку generated test.
 - Не ограничивай review только первой ошибкой verification. Всегда дополнительно посмотри сам generated test: создает ли он настоящий parent/application/window/controller/service object, использует ли optional pytest plugin fixture, тяжелый constructor или runtime setup, хотя target-код можно проверить через fake/stub.
+- Если generated_test_repair_kind="bad_setup_heavy_parent_instance", то generated_test_repair_instructions ОБЯЗАТЕЛЬНО должны содержать указание убрать настоящий parent constructor, подготовить minimal fake/self object, перечислить нужные fake/self поля и сохранить только проверки наблюдаемого поведения. Не ставь этот repair_kind, если инструкции фактически предлагают только import или minor syntax fix.
+- Если static diagnostics сообщает `generated_test_calls_project_instance_method_on_class`, проверь, был ли это exact target method. Для exact target method допустима рекомендация `ParentClass.target_method(fake_self, ...)` с минимальными fake dependencies. Для любых других project instance methods не рекомендуй class-level вызов и не рекомендуй реальный heavy parent instance.
+- Если есть одновременно простая статическая ошибка теста и тяжелый parent/runtime setup, укажи обе проблемы в test_issues и включи обе правки в generated_test_repair_instructions.
+- В generated_test_repair_instructions пиши конкретные инструкции для будущего repair generated test: что убрать, что замокать, какие поля fake/self подготовить, какие assert-ы заменить и какие production checks сохранить. Не предлагай менять production-код в этом поле.
 - Если production checks прошли, явных production_risks нет, а ошибка связана только с generated test, используй `production_likely_ok_test_likely_bad` и рекомендуй исключить или перегенерировать тест.
 - Если не можешь уверенно отделить ошибку теста от ошибки production-кода, используй `both_uncertain`, `manual_review`.
 - Поля verdict, quality, action, reasons, production_risks и test_issues должны быть согласованы.

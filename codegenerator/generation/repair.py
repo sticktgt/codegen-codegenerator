@@ -25,7 +25,7 @@ def parse_repair_response(content: str) -> dict:
     parsed['insert_scope'] = _normalize_insert_scope(parsed.get('insert_scope'))
     parsed['expected_new_symbol_kind'] = _normalize_expected_new_symbol_kind(parsed.get('expected_new_symbol_kind'))
     parsed['parent_qualname'] = str(parsed.get('parent_qualname') or '').strip() or None
-    parsed['import_changes'] = _normalize_import_changes(parsed.get('import_changes'))
+    parsed['import_changes'] = _normalize_import_changes(parsed.get('import_changes'), code=str(parsed.get('code') or ''))
     return parsed
 
 
