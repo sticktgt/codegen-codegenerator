@@ -125,6 +125,147 @@ def _artifact_metadata_trace_payload(
     }
 
 
+
+
+def _compact_metric_value(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, list):
+        return list(value[:20])
+    if isinstance(value, dict):
+        return {str(key): _compact_metric_value(item) for key, item in list(value.items())[:40]}
+    return str(value)
+
+
+def _status_for_section(section_name: str, chars: int, trim_steps: list[str]) -> str:
+    lowered = [str(item).lower() for item in trim_steps]
+    name = section_name.lower()
+    matching = [item for item in lowered if name in item]
+    if any('removed' in item or 'skipped' in item for item in matching):
+        return 'skipped'
+    if any('truncated' in item or 'trim' in item for item in matching):
+        return 'truncated'
+    return 'included' if chars > 0 else 'skipped'
+
+
+def _section_name_from_metric_key(key: str) -> str:
+    name = str(key)
+    for prefix in ('planner_', 'coder_', 'test_planner_', 'test_generator_', 'test_', 'repair_'):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
+    for suffix in ('_original_chars', '_prompt_chars', '_chars', '_count'):
+        if name.endswith(suffix):
+            name = name[:-len(suffix)]
+            break
+    return name
+
+
+def _prompt_sections_from_metrics(metrics: dict[str, Any], trim_steps: list[str]) -> list[dict[str, Any]]:
+    final_sizes = metrics.get('coder_prompt_section_sizes_final')
+    if isinstance(final_sizes, dict):
+        result = []
+        for name, value in final_sizes.items():
+            if name == 'stage':
+                continue
+            try:
+                chars = int(value or 0)
+            except (TypeError, ValueError):
+                chars = 0
+            result.append({
+                'name': str(name),
+                'actual_chars': chars,
+                'status': _status_for_section(str(name), chars, trim_steps),
+            })
+        return result
+
+    sections: dict[str, dict[str, Any]] = {}
+    for key, value in sorted(metrics.items()):
+        if not (key.endswith('_chars') or key.endswith('_count') or key.endswith('_original_chars')):
+            continue
+        if key.endswith('_prompt_chars') or key.endswith('_prompt_chars_before_trim') or key.endswith('_prompt_chars_after_trim'):
+            continue
+        section_name = _section_name_from_metric_key(key)
+        section = sections.setdefault(section_name, {'name': section_name})
+        if key.endswith('_count'):
+            section['count'] = _compact_metric_value(value)
+        else:
+            section['actual_chars'] = _compact_metric_value(value)
+
+    result = []
+    for section in sections.values():
+        raw_chars = section.get('actual_chars', 0)
+        try:
+            chars = int(raw_chars or 0)
+        except (TypeError, ValueError):
+            chars = 0
+        section['status'] = _status_for_section(str(section.get('name') or ''), chars, trim_steps)
+        result.append(section)
+    return result
+
+
+def _request_key_symbols(request: Any) -> list[str]:
+    result: list[str] = []
+
+    def add(value: Any) -> None:
+        text = str(value or '').strip()
+        if text and text not in result:
+            result.append(text)
+
+    target = getattr(request, 'target', {}) or {}
+    if isinstance(target, dict):
+        add(target.get('qualname'))
+        add(target.get('parent_qualname'))
+
+    project_context = getattr(request, 'project_context', {}) or {}
+    if isinstance(project_context, dict):
+        target_symbol = project_context.get('target_symbol') or project_context.get('target_function') or {}
+        if isinstance(target_symbol, dict):
+            add(target_symbol.get('qualname'))
+            add(target_symbol.get('parent_qualname'))
+
+    generated_artifact = getattr(request, 'generated_code_artifact', {}) or {}
+    if isinstance(generated_artifact, dict):
+        add(generated_artifact.get('target_qualname'))
+        add(generated_artifact.get('target_symbol'))
+        add(generated_artifact.get('parent_qualname'))
+
+    test_plan = getattr(request, 'test_plan', {}) or {}
+    if isinstance(test_plan, dict):
+        add(test_plan.get('target_symbol'))
+        for item in test_plan.get('must_use_symbols') or []:
+            add(item)
+
+    return result
+
+
+def _add_prompt_section_trace(
+    trace: dict[str, Any],
+    *,
+    stage: str,
+    request: Any,
+    user_prompt: str,
+    system_prompt: str,
+    metrics: dict[str, Any] | None = None,
+    trim_steps: list[str] | None = None,
+    available_user_prompt_chars: int | None = None,
+) -> None:
+    metrics = dict(metrics or {})
+    trim_steps = [str(item) for item in (trim_steps or metrics.get('coder_trim_steps') or [])]
+    sections = _prompt_sections_from_metrics(metrics, trim_steps)
+    payload = {
+        'stage': stage,
+        'request_id': str(getattr(request, 'request_id', '') or ''),
+        'prompt_chars': len(user_prompt or ''),
+        'system_prompt_chars': len(system_prompt or ''),
+        'total_prompt_chars': len(user_prompt or '') + len(system_prompt or ''),
+        'available_user_prompt_chars': available_user_prompt_chars,
+        'sections': sections,
+        'trim_steps': trim_steps,
+        'key_symbols': _request_key_symbols(request),
+    }
+    _add_step(trace, f'{stage}_prompt_section_trace', payload)
+
 def _warning_messages_from_format_warnings(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -386,6 +527,15 @@ def _merge_llm_usage(existing: dict[str, Any] | None, new_usage: dict[str, Any])
         merged[key] = round(float(merged.get(key, 0.0)) + float(new_usage.get(key, 0.0)), 6)
     return merged
 
+class OperationMismatchError(ValueError):
+    def __init__(self, actual_operation: str, expected_operation: str) -> None:
+        self.actual_operation = actual_operation
+        self.expected_operation = expected_operation
+        super().__init__(
+            f'Repair returned operation {actual_operation}, expected {expected_operation}'
+        )
+
+
 def _canonicalize_code_result_for_request(
     parsed: dict[str, Any],
     expected_operation: str | None,
@@ -399,7 +549,7 @@ def _canonicalize_code_result_for_request(
         raise ValueError(f'Unsupported operation returned by model: {operation}')
 
     if expected and operation != expected:
-        raise ValueError(f'Generator returned operation {operation}, expected {expected}')
+        raise OperationMismatchError(operation, expected)
 
     request_target = request_target or {}
     if operation == 'insert_after_symbol':
@@ -482,6 +632,15 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
             planner_prompt,
             prompts["system_rules"],
             config.prompt_budget.generate_chars_limit,
+        )
+        _add_prompt_section_trace(
+            trace,
+            stage="planner",
+            request=request,
+            user_prompt=planner_prompt,
+            system_prompt=prompts["system_rules"],
+            metrics=planner_prompt_metrics,
+            available_user_prompt_chars=available_user_chars,
         )
 
         requested_test_mode = str(
@@ -582,6 +741,16 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
             prompts["system_rules"],
             config.prompt_budget.generate_chars_limit,
         )
+        _add_prompt_section_trace(
+            trace,
+            stage="coder",
+            request=request,
+            user_prompt=coder_prompt,
+            system_prompt=prompts["system_rules"],
+            metrics=coder_context_metrics,
+            trim_steps=list(coder_context_metrics.get("coder_trim_steps") or []),
+            available_user_prompt_chars=available_user_chars,
+        )
 
         code_result, raw_code_response, _ = _call_llm_with_trace(
             trace=trace,
@@ -679,6 +848,15 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
                 planner_result=planner_result,
             )
 
+            _add_prompt_section_trace(
+                trace,
+                stage="test_planner",
+                request=test_request,
+                user_prompt=test_planner_prompt,
+                system_prompt=prompts["system_rules"],
+                metrics=test_planner_metrics,
+                available_user_prompt_chars=available_user_chars,
+            )
             test_planner_result, _, _ = _call_llm_with_trace(
                 trace=trace,
                 trace_step="test_planner",
@@ -784,6 +962,18 @@ def generate(request: GenerationRequest, config_path: str) -> GenerationResult:
                 config.prompt_budget.generate_test_chars_limit,
             )
 
+            _add_prompt_section_trace(
+                trace,
+                stage="test_generator",
+                request=test_request,
+                user_prompt=test_prompt,
+                system_prompt=prompts["system_rules"],
+                metrics={
+                    **(test_request_dict.get("context_metrics", {}) or {}),
+                    **test_context_metrics,
+                },
+                available_user_prompt_chars=available_user_chars,
+            )
             test_result, _, _ = _call_llm_with_trace(
                 trace=trace,
                 trace_step="test_generator",
@@ -878,6 +1068,15 @@ def generate_test(request: GenerationRequest, config_path: str) -> GenerationRes
             generated_code_artifact=request.generated_code_artifact or None,
             available_user_chars=available_user_chars,
             default_constraints=config.defaults_constraints,
+        )
+        _add_prompt_section_trace(
+            trace,
+            stage="test_planner",
+            request=request,
+            user_prompt=test_planner_prompt,
+            system_prompt=prompts["system_rules"],
+            metrics=test_planner_metrics,
+            available_user_prompt_chars=available_user_chars,
         )
         test_planner_result, _, _ = _call_llm_with_trace(
             trace=trace,
@@ -989,6 +1188,18 @@ def generate_test(request: GenerationRequest, config_path: str) -> GenerationRes
             config.prompt_budget.generate_test_chars_limit,
         )
 
+        _add_prompt_section_trace(
+            trace,
+            stage="test_generator",
+            request=request,
+            user_prompt=test_prompt,
+            system_prompt=prompts["system_rules"],
+            metrics={
+                **(request_dict.get("context_metrics", {}) or {}),
+                **test_context_metrics,
+            },
+            available_user_prompt_chars=available_user_chars,
+        )
         test_result, _, _ = _call_llm_with_trace(
             trace=trace,
             trace_step="test_generator",
@@ -1091,6 +1302,14 @@ def repair(request: RepairRequest, config_path: str) -> GenerationResult:
             request.request_id,
             config.models.planner_model,
         )
+        _add_prompt_section_trace(
+            trace,
+            stage="repair_planner",
+            request=request,
+            user_prompt=repair_planner_prompt,
+            system_prompt=prompts["system_rules"],
+            metrics=request_dict.get("context_metrics", {}) if isinstance(request_dict, dict) else {},
+        )
         repair_plan, _, _ = _call_llm_with_trace(
             trace=trace,
             trace_step="repair_planner",
@@ -1147,6 +1366,14 @@ def repair(request: RepairRequest, config_path: str) -> GenerationResult:
             config.models.repair_model,
         )
 
+        _add_prompt_section_trace(
+            trace,
+            stage="repair",
+            request=request,
+            user_prompt=repair_prompt,
+            system_prompt=prompts["system_rules"],
+            metrics=request_dict.get("context_metrics", {}) if isinstance(request_dict, dict) else {},
+        )
         repair_result, raw_repair_response, _ = _call_llm_with_trace(
             trace=trace,
             trace_step="repair",
@@ -1206,6 +1433,31 @@ def repair(request: RepairRequest, config_path: str) -> GenerationResult:
             code_artifact=code_artifact,
             trace_path=str(trace_path),
             llm_usage=trace.get('llm_usage'),
+        )
+        trace["result"] = result.to_dict()
+        save_trace(trace_path, trace)
+        return result
+
+    except OperationMismatchError as exc:
+        logger.warning(
+            "repair rejected operation mismatch request_id=%s actual=%s expected=%s",
+            request.request_id,
+            exc.actual_operation,
+            exc.expected_operation,
+        )
+        trace["error"] = {
+            "type": "operation_mismatch",
+            "message": str(exc),
+            "actual_operation": exc.actual_operation,
+            "expected_operation": exc.expected_operation,
+        }
+        result = GenerationResult(
+            request_id=request.request_id,
+            status="error",
+            trace_path=str(trace_path),
+            llm_usage=trace.get('llm_usage'),
+            error_type="operation_mismatch",
+            message=str(exc),
         )
         trace["result"] = result.to_dict()
         save_trace(trace_path, trace)

@@ -77,6 +77,7 @@
 - Нельзя исправлять class-target путем возврата только свободных top-level функций, helper-функций или отдельных методов.
 - Если в предыдущей генерации для class-target были возвращены внешние функции вместо класса, исправь результат на полное определение класса.
 - Если нужно добавить поведение модели или класса, добавляй его внутрь класса как методы или поля класса, если пользователь явно не попросил свободные функции.
+- Нельзя менять requested_operation: repair должен вернуть ту же operation, что указана в параметрах задачи. Если исправление требует другой operation, не пытайся исправлять это через другой тип artifact.
 - Для requested_operation=insert_after_symbol не меняй anchor-symbol и верни только код нового symbol.
 - Если requested_operation=insert_after_symbol, заполни поле insert_after значением anchor qualname.
 - Если requested_operation=insert_after_symbol и insert_scope=class_body, code может начинаться с decorator-строк, относящихся непосредственно к новому method; decorator и следующий def/async def должны быть на одном базовом уровне отступа, а тело метода — на один уровень глубже.
@@ -116,7 +117,10 @@
 - Если ошибка проверки указывает на дубликат symbol или повтор существующего метода/функции, не возвращай этот же symbol повторно: создай новый symbol с уникальным именем, соответствующим исходному пользовательскому запросу.
 
 Параметры задачи:
-{authoritative_target_coordinates_block}
+- requested_operation: {requested_operation}
+- target_file: {target_file}
+- target_symbol: {target_symbol}
+- insert_after: {insert_after}
 
 {repair_scope_block}{available_imports_block}{preservation_guidance_block}{repair_problem_block}{compact_target_contract_block}{required_repair_import_changes_block}{syntax_error_block}
 
